@@ -2,6 +2,8 @@ import re
 import sys
 import os
 import logging
+from functools import partial
+from multiprocessing.dummy import Pool as ThreadPool
 from taskcat.exceptions import TaskCatException
 
 log = logging.getLogger(__name__)
@@ -99,5 +101,25 @@ def buildmap(start_location, map_string, partial_match=True):
             fs_path_to_file = (os.path.join(fs_path, fs_file))
             if map_string in fs_path_to_file and '.git' not in fs_path_to_file:
                 fs_map.append(fs_path_to_file)
-
     return fs_map
+
+
+def fan_out(func, partial_kwargs, payload, threads):
+    pool = ThreadPool(threads)
+    if partial:
+        func = partial(func, **partial_kwargs)
+    results = pool.map(func, payload)
+    pool.close()
+    pool.join()
+    return results
+
+
+def group_stacks_by_region(stack_ids: list):
+    stacks_by_region = {}
+    for stack_id in stack_ids:
+        region = stack_id.split(":")[3]
+        if region not in stacks_by_region.keys():
+            stacks_by_region[region] = {"Region": region, "StackIds": []}
+        stacks_by_region[region]["StackIds"].append(stack_id)
+    stacks_by_region = [stacks_by_region[r] for r in stacks_by_region.keys()]
+    return stacks_by_region
