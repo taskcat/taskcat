@@ -22,7 +22,7 @@ import logging
 import signal
 from argparse import RawTextHelpFormatter
 from pkg_resources import get_distribution
-from taskcat.common_utils import exit0, exit1
+from taskcat.common_utils import exit0, exit1, region_from_stack_id, name_from_stack_id
 from taskcat.lambda_build import LambdaBuild
 from taskcat.cfn_lint import Lint
 from taskcat.logger import init_taskcat_cli_logger, PrintMsg
@@ -30,6 +30,39 @@ from taskcat.exceptions import TaskCatException
 
 
 log = logging.getLogger(__name__)
+
+STACK_PROGRESS_HEADER = "{}{} {} [{}]{}".format(
+    PrintMsg.header,
+    'AWS REGION'.ljust(15),
+    'CLOUDFORMATION STACK STATUS'.ljust(26),
+    'CLOUDFORMATION STACK NAME',
+    PrintMsg.rst_color
+)
+
+
+class StackStatusLogger:
+    def __init__(self):
+        self.previous_log = {}
+        log.warning(STACK_PROGRESS_HEADER)
+
+    def log(self, test_name, status, stack_id):
+        if test_name not in self.previous_log.keys():
+            self.previous_log[test_name] = {}
+        if stack_id not in self.previous_log[test_name].keys():
+            self.previous_log[test_name][stack_id] = ""
+        region = region_from_stack_id(stack_id)
+        stack_name = name_from_stack_id(stack_id)
+        logs = ("{3}{0} {1} [{2}]{4}".format(
+            region.ljust(15),
+            status.ljust(26),
+            stack_name,
+            PrintMsg.highlight,
+            PrintMsg.rst_color))
+        if logs != self.previous_log[test_name][stack_id]:
+            log.warning(logs)
+        else:
+            log.info(logs)
+        self.previous_log[test_name][stack_id] = logs
 
 
 def main():

@@ -43,8 +43,9 @@ from taskcat.cfn_resources import CfnResourceTools
 from taskcat.exceptions import TaskCatException
 from taskcat.s3_sync import S3Sync
 from taskcat.common_utils import exit0, exit1, param_list_to_dict
-from taskcat.cli import get_installed_version
+from taskcat.cli import get_installed_version, StackStatusLogger, STACK_PROGRESS_HEADER
 from taskcat.template_params import ParamGen
+from taskcat.cfn_stacker import CfnStacker
 
 
 class TestData(object):
@@ -820,45 +821,6 @@ class LegacyTaskCat(object):
         else:
             return str('Not-found')
 
-
-    def stackcheck(self, stack_id):
-        """
-        Given the stack id, this function returns the status of the stack as
-        a list with stack name, region, and status as list items, in the respective
-        order.
-
-        :param stack_id: CloudFormation stack id
-
-        :return: List containing the stack name, region and stack status in the
-            respective order.
-        """
-        stackdata = CommonTools(stack_id).parse_stack_info()
-        region = stackdata['region']
-        stack_name = stackdata['stack_name']
-        test_info = []
-
-        cfn = self._boto_client.get('cloudformation', region=region)
-        # noinspection PyBroadException
-        try:
-            test_query = (cfn.describe_stacks(StackName=stack_name))
-            for result in test_query['Stacks']:
-                test_info.append(stack_name)
-                test_info.append(region)
-                test_info.append(result.get('StackStatus'))
-                if result.get(
-                        'StackStatus') == 'CREATE_IN_PROGRESS' or result.get('StackStatus') == 'DELETE_IN_PROGRESS':
-                    test_info.append(1)
-                else:
-                    test_info.append(0)
-        except TaskCatException:
-            raise
-        except Exception:
-            test_info.append(stack_name)
-            test_info.append(region)
-            test_info.append("STACK_DELETED")
-            test_info.append(0)
-        return test_info
-
     def db_initproject(self, table_name):
         """
         :param table_name: Creates table if it does not exist. Waits for the table to become available
@@ -915,6 +877,7 @@ class LegacyTaskCat(object):
     def enable_dynamodb_reporting(self, enable):
         self._enable_dynamodb = enable
 
+    # V8SHIM
     def get_stackstatus(self, testdata_list, speed):
         """
         Given a list of TestData objects, this function checks the stack status
@@ -925,53 +888,27 @@ class LegacyTaskCat(object):
         :param speed: Interval (in seconds) in which the status has to be checked in loop
 
         """
-        active_tests = 1
-        log.warning("{}{} {} [{}]{}".format(
-            PrintMsg.header,
-            'AWS REGION'.ljust(15),
-            'CLOUDFORMATION STACK STATUS'.ljust(26),
-            'CLOUDFORMATION STACK NAME',
-            PrintMsg.rst_color))
-        latest_log = {}
-        while active_tests > 0:
-            current_active_tests = 0
-            time_stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for test in testdata_list:
-                if test not in latest_log.keys():
-                    latest_log[test] = {}
-                for stack in test.get_test_stacks():
-                    stack_id = stack['StackId']
-                    if stack_id not in latest_log[test].keys():
-                        latest_log[test][stack_id] = ""
-                    stackquery = self.stackcheck(str(stack['StackId']))
-                    current_active_tests = stackquery[3] + current_active_tests
-                    logs = ("{3}{0} {1} [{2}]{4}".format(
-                        stackquery[1].ljust(15),
-                        stackquery[2].ljust(26),
-                        stackquery[0],
-                        PrintMsg.highlight,
-                        PrintMsg.rst_color))
-                    if logs != latest_log[test][stack_id]:
-                        log.warning(logs)
-                    else:
-                        log.info(logs)
-                    latest_log[test][stack_id] = logs
-                    if self._enable_dynamodb:
-                        table = self.db_initproject(self.get_project_name())
-                        # Do not update when in cleanup start (preserves previous status)
-                        skip_status = ['DELETE_IN_PROGRESS', 'STACK_DELETED']
-                        if stackquery[2] not in skip_status:
-                            self.db_item(table,
-                                         time_stamp,
-                                         stackquery[1],
-                                         test.get_test_name(),
-                                         'log group stub',
-                                         self.get_owner(),
-                                         stackquery[2])
 
-                    stack['status'] = stackquery[2]
-                    active_tests = current_active_tests
-                    time.sleep(speed)
+        # stripped dynamo support from here, pluggable storage modules will be the way to implement in v9
+
+        cfn = CfnStacker(self._project_name)
+        status_log = StackStatusLogger()
+
+        while True:
+            stack_ids = set()
+            for test in testdata_list:
+                stack_ids.update(set([s["StackId"] for s in test.get_test_stacks()]))
+            results = cfn.stacks_status(stack_ids)
+
+            for test in testdata_list:
+                test_name = test.get_test_name()
+                for stack in test.get_test_stacks():
+                    status = [status for status in results.keys() if stack['StackId'] in results[status]][0]
+                    status_log.log(test_name, status, stack['StackId'])
+            time.sleep(speed)
+
+            if not results['IN_PROGRESS']:
+                break
 
     def cleanup(self, testdata_list, speed):
         """

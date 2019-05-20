@@ -149,7 +149,9 @@ class CfnStacker(object):
         cfn_client = self._get_client(region=region)
         results = cfn_client.describe_stacks(StackName=stack_id)["Stacks"][0]
         status = results["StackStatus"]
-        reason = results["StackStatusReason"]
+        reason = ''
+        if "StackStatusReason" in results:
+            reason = results["StackStatusReason"]
         for s in CfnStacker.STATUSES.keys():
             if status in CfnStacker.STATUSES[s]:
                 return stack_id, s, reason

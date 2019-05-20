@@ -9,6 +9,14 @@ from taskcat.exceptions import TaskCatException
 log = logging.getLogger(__name__)
 
 
+def region_from_stack_id(stack_id):
+    return stack_id.split(':')[3]
+
+
+def name_from_stack_id(stack_id):
+    return stack_id.split(':')[5].split('/')[1]
+
+
 class CommonTools:
 
     def __init__(self, stack_name):
@@ -106,7 +114,7 @@ def buildmap(start_location, map_string, partial_match=True):
 
 def fan_out(func, partial_kwargs, payload, threads):
     pool = ThreadPool(threads)
-    if partial:
+    if partial_kwargs:
         func = partial(func, **partial_kwargs)
     results = pool.map(func, payload)
     pool.close()
