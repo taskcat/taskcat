@@ -123,12 +123,12 @@ class Reaper(object):
     #           },
     #       ]
 
-    def delete_all(self, stack_list):
+    def delete_all(self, resource_list):
+        print(resource_list)
         log.info("Deleting all resources")
-        for stack in stack_list:
-            for resource in stack['resources']:
-                self.__delete_resource(
-                    resource['logicalId'], resource['resourceType'], resource['physicalId'])
+        for resource in resource_list:
+            self.__delete_resource(
+                resource['LogicalResourceId'], resource['ResourceType'], resource['PhysicalResourceId'])
 
     # Give a resource logical id and resource type, this function deletes the resource
     # Param:

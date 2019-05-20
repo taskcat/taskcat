@@ -131,3 +131,10 @@ def group_stacks_by_region(stack_ids: list):
         stacks_by_region[region]["StackIds"].append(stack_id)
     stacks_by_region = [stacks_by_region[r] for r in stacks_by_region.keys()]
     return stacks_by_region
+
+
+def merge_dicts(list_of_dicts):
+    merged_dict = {}
+    for single_dict in list_of_dicts:
+        merged_dict = {**merged_dict, **single_dict}
+    return merged_dict

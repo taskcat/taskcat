@@ -37,7 +37,7 @@ from taskcat.reaper import Reaper
 from taskcat.client_factory import ClientFactory
 from taskcat.logger import PrintMsg
 from taskcat.generate_reports import ReportBuilder
-from taskcat.common_utils import CommonTools
+from taskcat.common_utils import CommonTools, region_from_stack_id
 from taskcat.cfn_logutils import CfnLogTools
 from taskcat.cfn_resources import CfnResourceTools
 from taskcat.exceptions import TaskCatException
@@ -934,7 +934,9 @@ class LegacyTaskCat(object):
 
             if not results['IN_PROGRESS']:
                 break
+        return results
 
+    # V8SHIM
     def cleanup(self, testdata_list, speed):
         """
         This function deletes the CloudFormation stacks of the given tests.
@@ -946,47 +948,34 @@ class LegacyTaskCat(object):
         """
         self.remove_public_acl_from_bucket()
 
-        docleanup = self.get_docleanup()
-        log.debug("clean-up = %s " % str(docleanup))
-
-        if docleanup:
-            log.warning(" |CLEANUP STACKS{}".format(PrintMsg.header, PrintMsg.rst_color), extra={"nametag": self.nametag})
+        if self.run_cleanup:
+            log.warning(" |CLEANUP STACKS{}".format(PrintMsg.header, PrintMsg.rst_color), extra={
+                "nametag": self.nametag
+            })
             self.stackdelete(testdata_list)
-            self.get_stackstatus(testdata_list, speed)
-            self.deep_cleanup(testdata_list)
+            statuses = self.get_stackstatus(testdata_list, speed)
+            self.deep_cleanup(statuses)
         else:
-            log.info("[Retaining Stacks (Cleanup is set to {0}]".format(docleanup))
+            log.info("Retaining Stacks as cleanup is disabled")
 
-    def deep_cleanup(self, testdata_list):
+    # TODO: replace with SC based reaper
+    # V8SHIM
+    def deep_cleanup(self, statuses):
         """
         This function deletes the AWS resources which were not deleted
         by deleting CloudFormation stacks.
 
-        :param testdata_list: List of TestData objects
+        :param statuses: dict containing stack statuses
 
         """
-        for test in testdata_list:
-            failed_stack_ids = []
-            for stack in test.get_test_stacks():
-                if str(stack['status']) == 'DELETE_FAILED':
-                    failed_stack_ids.append(stack['StackId'])
-            if len(failed_stack_ids) == 0:
-                log.info("All stacks deleted successfully. Deep clean-up not required.")
-                continue
-
+        if statuses['FAILED']:
             log.info("Few stacks failed to delete. Collecting resources for deep clean-up.")
-            # get test region from the stack id
-            stackdata = CommonTools(failed_stack_ids[0]).parse_stack_info()
-            region = stackdata['region']
-            session = boto3.session.Session(region_name=region)
-            s = Reaper(session)
-
-            failed_stacks = CfnResourceTools(self._boto_client).get_all_resources(failed_stack_ids, region)
-            # print all resources which failed to delete
+            cfn = CfnStacker(self._project_name)
+            resources = cfn.list_stacks_resources(statuses['FAILED'], status='DELETE_FAILED')
             log.debug("Resources which failed to delete:\n")
-            for failed_stack in failed_stacks:
-                log.debug("Stack Id: " + failed_stack['stackId'])
-                for res in failed_stack['resources']:
+            for stack_id in statuses['FAILED']:
+                reap = Reaper(self._boto_client.get_session('default', region=region_from_stack_id(stack_id)))
+                for res in resources[stack_id]:
                     log.debug("{0} = {1}, {2} = {3}, {4} = {5}".format(
                         '\n\t\tLogicalId',
                         res.get('logicalId'),
@@ -995,7 +984,9 @@ class LegacyTaskCat(object):
                         '\n\t\tType',
                         res.get('resourceType')
                     ))
-            s.delete_all(failed_stacks)
+                reap.delete_all(resources[stack_id])
+        else:
+            log.info("All stacks deleted successfully. Deep clean-up not required.")
 
         self.delete_autobucket()
 
@@ -1044,6 +1035,7 @@ class LegacyTaskCat(object):
         else:
             log.info("Retaining assets in s3bucket [{0}]".format(self.get_s3bucket()))
 
+    # V8SHIM
     def stackdelete(self, testdata_list):
         """
         This function deletes the CloudFormation stacks of the given tests.
@@ -1051,13 +1043,11 @@ class LegacyTaskCat(object):
         :param testdata_list: List of TestData objects
 
         """
-        for test in testdata_list:
-            for stack in test.get_test_stacks():
-                stackdata = CommonTools(stack['StackId']).parse_stack_info()
-                region = stackdata['region']
-                stack_name = stackdata['stack_name']
-                cfn = self._boto_client.get('cloudformation', region=region)
-                cfn.delete_stack(StackName=stack_name)
+        stack_ids = []
+        for test_stacks in [test.get_test_stacks() for test in testdata_list]:
+            stack_ids += [stack['StackId'] for stack in test_stacks]
+        cfn = CfnStacker(self._project_name)
+        cfn.delete_stacks(stack_ids)
 
     def define_tests(self, yamlc, test):
         """

@@ -1,5 +1,5 @@
 from taskcat import ClientFactory
-from taskcat.common_utils import fan_out, group_stacks_by_region
+from taskcat.common_utils import fan_out, group_stacks_by_region, merge_dicts
 import uuid
 import boto3
 
@@ -172,21 +172,29 @@ class CfnStacker(object):
         # TODO: pagination
         return cfn_client.describe_stack_events(StackName=stack_id)["'StackEvents'"]
 
-    def list_stacks_resources(self, stack_ids, recurse=False, threads: int = 32):
+    def list_stacks_resources(self, stack_ids, status=None, recurse=False, threads: int = 32):
         if recurse:
             raise NotImplementedError("recurse not implemented")
         #return Resources  # {'arn::cloudformation::blah::StackId/blah': {"Events": CfnEvents, "ChildStacks": {"ChildId": CfnResources}}
-        results = fan_out(self._list_stack_resources_for_region, None, group_stacks_by_region(stack_ids), threads)
-        # TODO: format results
-        return results
+        results = fan_out(self._list_stack_resources_for_region, {"status": status}, group_stacks_by_region(stack_ids),
+                          threads)
+        return merge_dicts(results)
 
-    def _list_stack_resources_for_region(self, stacks, threads: int = 8):
-        return fan_out(self.list_stack_resources, {"region": stacks["Region"]}, stacks["StackIds"], threads)
+    def _list_stack_resources_for_region(self, stacks, status, threads: int = 8):
+        kwargs = {"region": stacks["Region"]}
+        if status:
+            kwargs['status'] = status
+        results = fan_out(self.list_stack_resources, kwargs, stacks["StackIds"], threads)
+        return merge_dicts(results)
 
-    def list_stack_resources(self, stack_id: str, region: str):
+    def list_stack_resources(self, stack_id: str, region: str, status=None):
         cfn_client = self._get_client(region=region)
-        # TODO: pagination
-        return cfn_client.list_stack_resources(StackName=stack_id)["StackResourceSummaries"]
+        resources = []
+        for page in cfn_client.get_paginator('list_stack_resources').paginate(StackName=stack_id):
+            resources += page["StackResourceSummaries"]
+        if status:
+            resources = [resource for resource in resources if resource['ResourceStatus'] == status]
+        return {stack_id: resources}
 
     # Return all stacks with instance's uuid
     def get_stackids(self, include_deleted=False, recurse=False, threads=32):
