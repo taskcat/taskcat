@@ -2,8 +2,6 @@ import re
 import sys
 import os
 import logging
-from functools import partial
-from multiprocessing.dummy import Pool as ThreadPool
 from taskcat.exceptions import TaskCatException
 
 log = logging.getLogger(__name__)
@@ -15,6 +13,14 @@ def region_from_stack_id(stack_id):
 
 def name_from_stack_id(stack_id):
     return stack_id.split(':')[5].split('/')[1]
+
+
+def s3_url_maker(bucket, key, client):
+    location = client.get_bucket_location(Bucket=bucket)['LocationConstraint']
+    url = f'https://{bucket}.s3.amazonaws.com/{key}'
+    if location:
+        url = f'https://{bucket}.s3-{location}.amazonaws.com/{key}'
+    return url
 
 
 class CommonTools:
@@ -110,16 +116,6 @@ def buildmap(start_location, map_string, partial_match=True):
             if map_string in fs_path_to_file and '.git' not in fs_path_to_file:
                 fs_map.append(fs_path_to_file)
     return fs_map
-
-
-def fan_out(func, partial_kwargs, payload, threads):
-    pool = ThreadPool(threads)
-    if partial_kwargs:
-        func = partial(func, **partial_kwargs)
-    results = pool.map(func, payload)
-    pool.close()
-    pool.join()
-    return results
 
 
 def group_stacks_by_region(stack_ids: list):

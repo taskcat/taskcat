@@ -19,7 +19,6 @@
 # --imports --
 from __future__ import print_function
 
-import datetime
 import json
 import os
 import re
@@ -37,15 +36,15 @@ from taskcat.reaper import Reaper
 from taskcat.client_factory import ClientFactory
 from taskcat.logger import PrintMsg
 from taskcat.generate_reports import ReportBuilder
-from taskcat.common_utils import CommonTools, region_from_stack_id
+from taskcat.common_utils import region_from_stack_id, s3_url_maker
 from taskcat.cfn_logutils import CfnLogTools
-from taskcat.cfn_resources import CfnResourceTools
 from taskcat.exceptions import TaskCatException
 from taskcat.s3_sync import S3Sync
 from taskcat.common_utils import exit0, exit1, param_list_to_dict
-from taskcat.cli import get_installed_version, StackStatusLogger, STACK_PROGRESS_HEADER
+from taskcat.cli import get_installed_version, StackStatusLogger
 from taskcat.template_params import ParamGen
-from taskcat.cfn_stacker import CfnStacker
+from taskcat.cfn.threaded import ThreadedStack, ThreadedTemplates
+from taskcat.cfn.template import Template
 
 
 class TestData(object):
@@ -131,6 +130,7 @@ class LegacyTaskCat(object):
         self.lambda_build_only = False
         self._sig = base64.b64decode("dENhVA==").decode()
         self._jobid = str(uuid.uuid4())
+        self.templates = {}
 
         if args.upload_only:
             self.upload_only = True
@@ -365,6 +365,14 @@ class LegacyTaskCat(object):
     #      FUNCTIONS       #
     # ==================== #
 
+    # V8SHIM
+    def set_templates(self, templates):
+        for t in templates:
+            path = self._project_path + '/templates/' + t
+            url = s3_url_maker(self.s3bucket, self._project_name + '/templates/' + t, self._boto_client.get('s3'))
+            template = Template(path, self._project_path, url=url)
+            self.templates[t] = template
+
     def stage_in_s3(self, taskcat_cfg):
         """
         Upload templates and other artifacts to s3.
@@ -593,6 +601,7 @@ class LegacyTaskCat(object):
         else:
             return {}
 
+    # V8SHIM
     def validate_template(self, taskcat_cfg, test_list):
         """
         Returns TRUE if all the template files are valid, otherwise FALSE.
@@ -604,30 +613,16 @@ class LegacyTaskCat(object):
         """
         # Load global regions
         self.set_test_region(self.get_global_region(taskcat_cfg))
-        for test in test_list:
-            log.info(" :Validate Template in test[%s]" % test, extra={"nametag": self.nametag})
-            self.define_tests(taskcat_cfg, test)
-            try:
-                log.debug("Default region [%s]" % self.get_default_region())
-                cfn = self._boto_client.get('cloudformation', region=self.get_default_region())
 
-                result = cfn.validate_template(TemplateURL=self.s3_url_prefix + '/templates/' + self.get_template_file())
-                log.warning("Validated [%s]" % self.get_template_file(), extra={"nametag": PrintMsg.PASS})
-                if 'Description' in result:
-                    cfn_result = (result['Description'])
-                    log.info("Description  [%s]" % textwrap.fill(cfn_result))
-                else:
-                    log.warning("Please include a top-level description for template: [%s]" % self.get_template_file())
-                cfn_params = json.dumps(result['Parameters'], indent=11, separators=(',', ': '))
-                log.debug("Parameters:")
-                log.debug(cfn_params)
-            except TaskCatException:
-                raise
-            except Exception as e:
-                log.debug(str(e))
-                log.info("Deleting any automatically-created buckets...")
-                self.delete_autobucket()
-                raise TaskCatException("Cannot validate %s" % self.get_template_file())
+        templates = set([v for _, v in self.templates.items()])
+        tt = ThreadedTemplates(templates)
+
+        results = tt.validate(self.get_global_region(taskcat_cfg))
+
+        if results:
+            for r in results:
+                log.error(r)
+            raise TaskCatException("Template validation failed")
         return True
 
     def generate_input_param_values(self, s_parms, region):
@@ -745,6 +740,7 @@ class LegacyTaskCat(object):
                     if self.get_template_type() == 'json':
                         log.debug(json.dumps(j_params, sort_keys=True, indent=11, separators=(',', ': ')))
                     try:
+                        print([stackname, self.get_template_path(), j_params, self.tags, region])
                         stackdata = cfn.create_stack(
                             StackName=stackname,
                             DisableRollback=True,
@@ -934,6 +930,10 @@ class LegacyTaskCat(object):
 
             if not results['IN_PROGRESS']:
                 break
+        if results['FAILED']:
+            descendants = cfn.get_stacks_errors(list(results['FAILED'].keys()))
+            print(descendants)
+            raise TaskCatException('breakpoint')
         return results
 
     # V8SHIM
@@ -1309,44 +1309,7 @@ class LegacyTaskCat(object):
             raise TaskCatException("config.yml [%s] is not formatted well!!" % yaml_file)
         return run_tests
 
-    def collect_resources(self, testdata_list, logpath):
-        """
-        This function collects the AWS resources information created by the
-        CloudFormation stack for generating the report.
-
-        :param testdata_list: List of TestData object
-        :param logpath: Log file path
-
-        """
-        resource = {}
-        log.info("(Collecting Resources)")
-        for test in testdata_list:
-            for stack in test.get_test_stacks():
-                stackinfo = CommonTools(stack['StackId']).parse_stack_info()
-                # Get stack resources
-                resource[stackinfo['region']] = (
-                    CfnResourceTools(self._boto_client).get_resources(
-                        str(stackinfo['stack_name']),
-                        str(stackinfo['region'])
-                    )
-                )
-                extension = '.txt'
-                test_logpath = '{}/{}-{}-{}{}'.format(
-                    logpath,
-                    stackinfo['stack_name'],
-                    stackinfo['region'],
-                    'resources',
-                    extension)
-
-                # Write resource logs
-                file = open(test_logpath, 'w')
-                file.write(str(
-                    json.dumps(
-                        resource,
-                        indent=4,
-                        separators=(',', ': '))))
-                file.close()
-
+    # V8SHIM
     def createreport(self, testdata_list, filename):
         """
         This function creates the test report.
@@ -1369,8 +1332,8 @@ class LegacyTaskCat(object):
 
         # Collect recursive logs
         # file path is already setup by getofile function in genreports
-        cfn_logs = CfnLogTools(self._boto_client)
-        cfn_logs.createcfnlogs(testdata_list, o_directory)
+        cfn_logs = CfnLogTools(self._project_name, self._boto_client, testdata_list)
+        cfn_logs.createcfnlogs(o_directory)
 
         # Generate html test dashboard
         cfn_report = ReportBuilder(testdata_list, dashboard_filename, self.version, self._boto_client, self)

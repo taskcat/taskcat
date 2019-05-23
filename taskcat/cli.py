@@ -120,10 +120,12 @@ def main():
             tcat_instance.set_project_name(project_name)
             tcat_instance.set_project_path(project_path)
             tcat_instance.stage_in_s3(taskcat_cfg)
+            tcat_instance.set_templates([t['template_file'] for _, t in taskcat_cfg['tests'].items()])
             tcat_instance.validate_template(taskcat_cfg, test_list)
             tcat_instance.validate_parameters(taskcat_cfg, test_list)
             # instance.stackcreate returns testdata object
             testdata = tcat_instance.stackcreate(taskcat_cfg, test_list, args.stack_prefix)
+            exit1("breakpoint")
             tcat_instance.get_stackstatus(testdata, 5)
             tcat_instance.createreport(testdata, 'index.html')
             tcat_instance.cleanup(testdata, 5)

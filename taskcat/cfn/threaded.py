@@ -1,63 +1,67 @@
 from taskcat import ClientFactory
-from taskcat.common_utils import fan_out, group_stacks_by_region, merge_dicts
+from taskcat.common_utils import group_stacks_by_region, merge_dicts
+from taskcat.exceptions import TaskCatException
+from taskcat.cfn.template import Template
+from functools import partial
+from multiprocessing.dummy import Pool as ThreadPool
 import uuid
-import boto3
+from typing import Set
+import logging
+
+LOG = logging.getLogger(__name__)
 
 
-class CfnStacker(object):
+def fan_out(func, partial_kwargs, payload, threads):
+    pool = ThreadPool(threads)
+    name = func.__func__.__name__
+    if partial_kwargs:
+        func = partial(func, **partial_kwargs)
+    results = pool.map(func, payload)
+    pool.close()
+    pool.join()
+    return results
 
-    NULL_UUID = uuid.UUID(int=0)
-    CAPABILITIES = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
-    STATUSES = {
-        "COMPLETE": [
-            'CREATE_COMPLETE', 'UPDATE_COMPLETE', 'DELETE_COMPLETE'
-        ],
-        "IN_PROGRESS": [
-            'CREATE_IN_PROGRESS', 'DELETE_IN_PROGRESS', 'UPDATE_IN_PROGRESS', 'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS'
-        ],
-        "FAILED": [
-            'DELETE_FAILED', 'CREATE_FAILED', 'ROLLBACK_IN_PROGRESS', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
-            'UPDATE_ROLLBACK_IN_PROGRESS''UPDATE_ROLLBACK_FAILED', 'UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS',
-            'UPDATE_ROLLBACK_COMPLETE'
-        ]
-    }
 
-    def __init__(self, project_name: str, uid: uuid.UUID = NULL_UUID, template_urls: list = None, regions: list = None,
-                 recurse: bool = True, stack_name_prefix: str = 'tCat', tags: list = None,
-                 client_factory_instance=None):
-        self.project_name = project_name
-        self.recurse = recurse
-        self.stack_name_prefix = stack_name_prefix
-        self.template_urls = template_urls if template_urls else []
-        self.regions = regions if regions else []
-        self.tags = tags if tags else []
-        self.client_factory = client_factory_instance if client_factory_instance else ClientFactory()
-        self.uid = uuid.uuid4() if uid == CfnStacker.NULL_UUID else uid
+class ThreadedTemplates:
+    def __init__(self, templates: Set[Template], bucket_name: str = '', prefix: str = '', recurse=True):
+        if not isinstance(templates, set):
+            templates = set(templates)
+        if recurse:
+            for template in templates:
+                templates = templates.union(template.descendents())
+        distinct_template_paths = {t.template_path: t for t in templates}
+        self.templates = set([val for _, val in distinct_template_paths.items()])
+        self.bucket_name = bucket_name
+        self.prefix = prefix
 
-    def _get_client(self, region):
-        if region:
-            return self.client_factory.get("cloudformation", region=region)
-        else:
-            return self.client_factory.get("cloudformation")
-
-    @staticmethod
-    def _get_regions():
-        return boto3.Session().get_available_regions("cloudformation")
-
-    def validate_templates(self, template_urls: list = None, regions: list = None, recurse: bool = True, threads=8):
-        template_urls = template_urls if template_urls else self.template_urls
-        regions = regions if regions else self.regions
-        recurse = recurse if recurse else self.recurse
-        # TODO: implement child template discovery
-        results = fan_out(self._validate_templates_across_regions, {"regions": regions}, template_urls, threads)
+    def validate(self, regions: list, threads=8):
+        results = fan_out(self._validate_templates_across_regions, {"regions": regions}, self.templates, threads)
         failures = []
         for t in results:
             failures += [r for r in t if r]
         return failures
 
-    def _validate_templates_across_regions(self, template_url: str, regions: list, threads: int = 32):
-        results = fan_out(self.validate_template, {"template": template_url}, regions, threads)
+    def _validate_templates_across_regions(self, template: Template, regions: list, threads: int = 32):
+        kwargs = {"bucket_name": self.bucket_name, "prefix": self.prefix}
+        results = fan_out(template.validate, kwargs, regions, threads)
         return [r for r in results if r]
+
+
+class ThreadedStack:
+
+    NULL_UUID = uuid.UUID(int=0)
+
+    def __init__(self, project_name: str, uid: uuid.UUID = NULL_UUID, template_urls: list = None, regions: list = None,
+                 stack_name_prefix: str = 'tCat', tags: list = None, client_factory_instance=None):
+        self.project_name = project_name
+        self.stack_name_prefix = stack_name_prefix
+        self.template_urls = template_urls if template_urls else []
+        self.regions = regions if regions else []
+        self.tags = tags if tags else []
+        self.client_factory_instance = client_factory_instance if client_factory_instance else ClientFactory()
+        self.uid = uuid.uuid4() if uid == CfnTest.NULL_UUID else uid
+
+
 
     def validate_template(self, template, region=None):
         cfn_client = self._get_client(region)
@@ -155,27 +159,28 @@ class CfnStacker(object):
         for s in CfnStacker.STATUSES.keys():
             if status in CfnStacker.STATUSES[s]:
                 return stack_id, s, reason
+        raise TaskCatException("Invalid stack status {status}")
 
     def describe_stacks_events(self, stack_ids, recurse=False, threads: int = 32):
         if recurse:
             raise NotImplementedError("recurse not implemented")
-        #return Events  # {'arn::cloudformation::blah::StackId/blah': {"Events": CfnEvents, "ChildStacks": {"ChildId": CfnEvents}}
         results = fan_out(self._describe_stack_events_for_region, None, group_stacks_by_region(stack_ids), threads)
-        # TODO: format results
-        return results
+        return merge_dicts(results)
 
     def _describe_stack_events_for_region(self, stacks, threads: int = 8):
-        return fan_out(self.describe_stack_events, {"region": stacks["Region"]}, stacks["StackIds"], threads)
+        results = fan_out(self.describe_stack_events, {"region": stacks["Region"]}, stacks["StackIds"], threads)
+        return merge_dicts(results)
 
     def describe_stack_events(self, stack_id: str, region: str):
         cfn_client = self._get_client(region=region)
-        # TODO: pagination
-        return cfn_client.describe_stack_events(StackName=stack_id)["'StackEvents'"]
+        events = []
+        for page in cfn_client.get_paginator('describe_stack_events').paginate(StackName=stack_id):
+            events += page["StackEvents"]
+        return {stack_id: events}
 
     def list_stacks_resources(self, stack_ids, status=None, recurse=False, threads: int = 32):
         if recurse:
             raise NotImplementedError("recurse not implemented")
-        #return Resources  # {'arn::cloudformation::blah::StackId/blah': {"Events": CfnEvents, "ChildStacks": {"ChildId": CfnResources}}
         results = fan_out(self._list_stack_resources_for_region, {"status": status}, group_stacks_by_region(stack_ids),
                           threads)
         return merge_dicts(results)

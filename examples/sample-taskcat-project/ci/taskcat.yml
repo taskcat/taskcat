@@ -13,10 +13,12 @@ global:
     - us-east-1
     - us-west-1
     - us-west-2
+  s3bucket: jmmccon-qs-dev
 tests:
   taskcat-json:
     parameter_input: debug-input.json
     regions:
       - us-east-1
+      - us-west-2
     template_file: debug.template
 

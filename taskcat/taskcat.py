@@ -20,3 +20,4 @@ class TaskCat(object):
         self.createreport = self._legacy.createreport
         self.cleanup = self._legacy.cleanup
         self.one_or_more_tests_failed = self._legacy.one_or_more_tests_failed
+        self.set_templates = self._legacy.set_templates
