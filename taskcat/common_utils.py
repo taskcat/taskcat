@@ -2,6 +2,7 @@ import re
 import sys
 import os
 import logging
+from pathlib import Path
 from taskcat.exceptions import TaskCatException
 
 log = logging.getLogger(__name__)
@@ -141,3 +142,11 @@ def buildmap(start_location, map_string, partial_match=True):
                 fs_map.append(fs_path_to_file)
 
     return fs_map
+
+
+def absolute_path(path: [str, Path]):
+    if path is None:
+        return None
+    if not Path(path).exists():
+        return None
+    return Path(path).resolve()

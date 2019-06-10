@@ -1,0 +1,3 @@
+---
+boto_profile: test
+lint: true

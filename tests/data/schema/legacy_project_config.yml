@@ -1,9 +1,7 @@
 ---
-general:
-  boto_profile: test
-project:
+global:
   owner: owner@company.com
-  name: nested-fail
+  qsname: nested-fail
   regions:
     - us-east-1
     - us-west-2
