@@ -53,7 +53,8 @@ class CommonTools:
     def __init__(self, stack_name):
         self.stack_name = stack_name
 
-    def regxfind(self, re_object, data_line):
+    @staticmethod
+    def regxfind(re_object, data_line):
         """
         Returns the matching string.
 
@@ -76,8 +77,8 @@ class CommonTools:
 
         """
         stack_info = dict()
-        region_re = re.compile('(?<=:)(.\w-.+(\w*)-\d)(?=:)')
-        stack_name_re = re.compile('(?<=:stack/)(tCaT.*.)(?=/)')
+        region_re = re.compile(r'(?<=:)(.\w-.+(\w*)-\d)(?=:)')
+        stack_name_re = re.compile(r'(?<=:stack/)(tCaT.*.)(?=/)')
         stack_info['region'] = self.regxfind(region_re, self.stack_name)
         stack_info['stack_name'] = self.regxfind(stack_name_re, self.stack_name)
         return stack_info
@@ -140,13 +141,13 @@ def buildmap(start_location, map_string, partial_match=True):
             fs_path_to_file = (os.path.join(fs_path, fs_file))
             if map_string in fs_path_to_file and '.git' not in fs_path_to_file:
                 fs_map.append(fs_path_to_file)
-
     return fs_map
 
 
 def absolute_path(path: [str, Path]):
     if path is None:
         return None
-    if not Path(path).exists():
+    path = Path(path).expanduser().resolve()
+    if not path.exists():
         return None
-    return Path(path).resolve()
+    return path

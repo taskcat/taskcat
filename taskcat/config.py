@@ -13,6 +13,15 @@ from taskcat.client_factory import ClientFactory
 LOG = logging.getLogger(__name__)
 
 
+class ConfigItem:
+    def __init__(self, value: [str, int, float, bool], source: str):
+        self._value = value
+        self.source: str = source
+
+    def __int__(self):
+        return self._value
+
+
 class Test:
     def __init__(self, template_file: Path, parameter_input: Path = None, parameters: dict = None, regions: set = None,
                  project_root: Path = Path('./')):
@@ -76,7 +85,7 @@ class Test:
                 raise e
 
     @classmethod
-    def from_dict(cls, raw_test: dict, project_root = Path('./')):
+    def from_dict(cls, raw_test: dict, project_root=Path('./')):
         return Test(**raw_test, project_root=project_root)
 
 
@@ -90,22 +99,22 @@ class Config:
     CLI args
     Override file (for parameter overrides)
     """
+    DEFAULT_PROJECT_PATHS = ['./.taskcat.yml', './.taskcat.yaml', './ci/taskcat.yaml', './ci/taskcat.yml']
 
     def __init__(self, args: dict = None, global_config_path: str = '~/.taskcat.yml', template_path: str = None,
-                 project_config_path: str = '.taskcat.yml', project_root: str = './', override_file: str = None,
+                 project_config_path: str = None, project_root: str = './', override_file: str = None,
                  all_env_vars: List[dict] = os.environ.items(),
                  client_factory_instance: ClientFactory = ClientFactory()):
         # inputs
         if template_path:
             if not Path(template_path).exists():
                 raise TaskCatException(f"failed adding config from template file {template_path} file not found")
-        self.project_root: Path = absolute_path(project_root)
+        self.project_root: [Path, None] = absolute_path(project_root)
         self.args: dict = args if args else {}
-        self.global_config_path: Path = absolute_path(global_config_path)
-        self.template_path: Path = absolute_path(template_path)
-        self.project_config_path: Path = absolute_path(self.project_root / project_config_path)
-        self.override_file: Path = absolute_path(override_file)
-        self._all_env_vars: List[dict] = all_env_vars
+        self.global_config_path: [Path, None] = absolute_path(global_config_path)
+        self.template_path: [Path, None] = self._absolute_path(template_path)
+        self.override_file: Path = self._absolute_path(override_file)
+
         # general config
         self.boto_profile: str = ''
         self.aws_access_key: str = ''
@@ -121,6 +130,7 @@ class Config:
         self.lambda_build_only: bool = False
         self.exclude: str = ''
         self.enable_sig_v2: bool = False
+
         # project config
         self.name: str = ''
         self.owner: str = ''
@@ -130,6 +140,11 @@ class Config:
         self.regions: Set[str] = set()
         self.env_vars = {}
 
+        # clever processors, not well liked
+        self._harvest_env_vars(all_env_vars)
+        self._parse_project_config(project_config_path)
+
+        # build config object from gathered entries
         self._process_global_config()
         self._process_project_config()
         self._process_template_config()
@@ -138,6 +153,28 @@ class Config:
         self._propogate_regions(client_factory_instance)
         if not self.template_path and not self.tests:
             raise TaskCatException("minimal config requires at least one test or a template_path to be defined")
+
+    def _parse_project_config(self, project_config_path):
+        self.project_config_path: [Path, None] = self._absolute_path(project_config_path)
+        if self.project_config_path is None:
+            for p in Config.DEFAULT_PROJECT_PATHS:
+                try:
+                    self.project_config_path: [Path, None] = self._absolute_path(p)
+                    LOG.debug(f"found project config in default location {p}")
+                    break
+                except TaskCatException:
+                    LOG.debug(f"didn't find project config in {p}")
+
+    def _absolute_path(self, path: [str, Path]) -> [Path, None]:
+        if path is None:
+            return path
+        path = Path(path)
+        abs_path = absolute_path(path)
+        if self.project_root and not abs_path:
+            abs_path = absolute_path(self.project_root / Path(path))
+        if not abs_path:
+            raise TaskCatException(f"Unable to resolve path {path}, with project_root {self.project_root}")
+        return abs_path
 
     def _set(self, opt, val):
         if opt in ['project', 'general']:
@@ -201,15 +238,32 @@ class Config:
             instance['tests'] = tests
         try:
             self.validate(instance, 'project_config')
-        except exceptions.ValidationError as e:
-            try:
-                self.validate(instance, 'legacy_project_config')
-                LOG.warning("%s config file is in a format that will be deprecated in the next version of taskcat",
-                            str(self.project_config_path))
-            except exceptions.ValidationError:
-                # raise original exception
-                raise e
+        except exceptions.ValidationError:
+            if self._process_legacy_project(instance) is not None:
+                self.validate(instance, 'project_config')
         self._set_all(instance)
+
+    def _process_legacy_project(self, instance) -> [None, Exception]:
+        try:
+            self.validate(instance, 'legacy_project_config')
+            LOG.warning("%s config file is in a format that will be deprecated in the next version of taskcat",
+                        str(self.project_config_path))
+        except exceptions.ValidationError as e:
+            LOG.debug(f"legacy config validation failed: {e}")
+            return e
+        # rename global to project
+        if 'global' in instance:
+            instance['project'] = instance['global']
+            del instance['global']
+        if 'project' in instance:
+            # delete unneeded config items
+            for p in ["marketplace-ami", "reporting"]:
+                del instance['project'][p]
+            # rename items with new keys
+            for p in [['qsname', 'name']]:
+                instance['project'][p[1]] = instance['project'][p[0]]
+                del instance['project'][p[0]]
+        return
 
     def _process_template_config(self):
         if not self.template_path:
@@ -234,7 +288,6 @@ class Config:
                                                                 project_root=self.project_root)
 
     def _process_env_vars(self):
-        self._harvest_env_vars()
         self._to_project(self.env_vars)
         self._to_tests(self.env_vars)
         self._to_general(self.env_vars)
@@ -261,8 +314,7 @@ class Config:
                 args['project'][arg[8:]] = args[arg]
                 del args[arg]
 
-    @staticmethod
-    def _to_tests(args: dict):
+    def _to_tests(self, args: dict):
         if 'template_file' in args.keys() or 'parameter_input' in args.keys() or 'regions' in args.keys():
             template_file = args['template_file'] if 'template_file' in args.keys() else None
             parameter_input = args['parameter_input'] if 'parameter_input' in args.keys() else None
@@ -281,8 +333,8 @@ class Config:
             args['general'][arg] = args[arg]
             del args[arg]
 
-    def _harvest_env_vars(self):
-        for key, value in self._all_env_vars:
+    def _harvest_env_vars(self, env_vars):
+        for key, value in env_vars:
             if key.startswith('TASKCAT_'):
                 key = key[8:].lower()
                 if value.isnumeric():

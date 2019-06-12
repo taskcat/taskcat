@@ -6,7 +6,7 @@
         "tests":   {
             "type": "object",
             "patternProperties": {
-                "^[a-z/d-]*$": {
+                "^[a-z\\d-]*$": {
                     "type": "object",
                     "properties": {
                         "template_file":    { "type": "string" },
@@ -18,7 +18,9 @@
                                 "type": "string",
                                 "pattern": "^(ap|eu|us|sa|ca|cn|af|me|us-gov)-(central|south|north|east|west|southeast|southwest|northeast|northwest)-[0-9]$"
                             }
-                        }
+                        },
+                        "parameter_input_file": {"type": "string" },
+                        "parameters": { "$ref": "schema_definitions.json#/definitions/parameters" }
                     },
                     "required": ["template_file"],
                     "additionalProperties": false
@@ -29,7 +31,7 @@
         "global":  {
             "type": "object",
             "properties": {
-                "qsname":  { "type": "string", "pattern": "^[a-z/d-]*$" },
+                "qsname":  { "type": "string", "pattern": "^[a-z\\d-]*$" },
                 "owner":   { "type": "string" },
                 "regions": {
                     "type": "array",
@@ -40,7 +42,9 @@
                     }
                 },
                 "package-lambda": { "type": "boolean" },
-                "s3bucket": {"type": "string", "pattern": "^[a-z0-9-]*$"}
+                "s3bucket": {"type": "string", "pattern": "^[a-z0-9-]*$"},
+                "marketplace-ami": { "type": "boolean" },
+                "reporting": { "type": "boolean" }
             },
             "additionalProperties": false,
             "required": ["qsname"]
