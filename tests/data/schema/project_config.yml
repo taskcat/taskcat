@@ -1,6 +1,6 @@
 ---
 general:
-  project_root: ./
+  project_root: ../
 project:
   owner: owner@company.com
   name: nested-fail
@@ -9,5 +9,7 @@ project:
     - us-west-2
 tests:
   taskcat-json:
-    parameter_input: input.json
-    template_file: test.template.yaml
+    parameter_input: ci/input.json
+    template_file: templates/test.template.yaml
+    parameters:
+      MyParam: MyValue

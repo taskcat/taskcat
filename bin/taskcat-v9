@@ -10,7 +10,7 @@
 """
 
 from __future__ import print_function
-import taskcat
+from taskcat.cli import main
 from taskcat import TaskCatException
 import sys
 
@@ -18,4 +18,4 @@ import sys
 if __name__ == '__main__':
     if sys.version_info[0] < 3:
         raise TaskCatException("Please use Python 3")
-    taskcat.cli.main()
+    main()
