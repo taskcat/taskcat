@@ -37,6 +37,7 @@
             "$id": "#test",
             "type": "object",
             "properties": {
+                "auth":             { "$ref": "#/definitions/auth" },
                 "template_file":    { "type": "string" },
                 "parameter_input":  { "type": "string" },
                 "regions":          { "$ref": "#/definitions/regions" },
@@ -65,23 +66,42 @@
             "$id": "#general",
             "type": "object",
             "properties": {
+                "auth":                 { "$ref": "#/definitions/auth" },
                 "config_file":          { "type": "string" },
                 "project_root":         { "type": "string" },
-                "boto_profile":         { "type": "string" },
+                "profile_name":         { "type": "string" },
                 "aws_access_key":       { "type": "string" },
                 "aws_secret_key":       { "type": "string" },
                 "no_cleanup":           { "type": "boolean" },
                 "no_cleanup_failed":    { "type": "boolean" },
                 "public_s3_bucket":     { "type": "boolean" },
                 "verbosity":            { "type": "string", "enum": [ "debug", "info", "warning", "error" ] },
-                "tags":                 { "$ref": "schema_definitions.json#/definitions/tags" },
+                "tags":                 { "$ref": "#/definitions/tags" },
                 "stack_prefix":         { "type": "string" },
                 "lint":                 { "type": "boolean" },
                 "upload_only":          { "type": "boolean" },
                 "lambda_build_only":    { "type": "boolean" },
                 "exclude":              { "type": "string" },
                 "enable_sig_v2":        { "type": "boolean" },
-                "parameters":           { "$ref": "schema_definitions.json#/definitions/parameters" }
+                "parameters":           { "$ref": "#/definitions/parameters" }
+            },
+            "additionalProperties": false
+        },
+        "auth": {
+            "$id": "#auth",
+            "type": "object",
+            "additionalProperties": false,
+            "patternProperties": {
+                "^((ap|eu|us|sa|ca|cn|af|me|us-gov)-(central|south|north|east|west|southeast|southwest|northeast|northwest)-[0-9])|(default)$": { "$ref": "#/definitions/auth_item" }
+            }
+        },
+        "auth_item": {
+            "$id": "#auth_item",
+            "type": "object",
+            "properties": {
+                "profile_name":         { "type": "string" },
+                "aws_access_key":       { "type": "string" },
+                "aws_secret_key":       { "type": "string" }
             },
             "additionalProperties": false
         }

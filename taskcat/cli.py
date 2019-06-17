@@ -60,9 +60,9 @@ class Cli:
         print(f"usage: {NAME} [global_flags] <command> <subcommand> [options] \n"
               f"To see specific help text, you can run: \n"
               f"\n"
-              f"{NAME} help \n"
-              f"{NAME} <command> help \n"
-              f"{NAME} <command> <subcommand> help \n"
+              f"{NAME} --help \n"
+              f"{NAME} <command> --help \n"
+              f"{NAME} <command> <subcommand> --help \n"
               f"\n"
               f"Global flags: \n"
               f"    --debug # enables debug output \n"
@@ -75,10 +75,10 @@ class Cli:
         number_of_args = len(self.args)
         command = self.args[0] if len(self.args) > 0 else ''
         subcommand = self.args[1] if len(self.args) > 1 else ''
-        options = self.args[1:] if len(self.args) > 2 else []
+        options = self.args[2:] if len(self.args) > 2 else []
 
         # print global help
-        if number_of_args == 0 or command == "help":
+        if number_of_args == 0 or command == "--help":
             self._print_help()
             return
         # print version
@@ -98,23 +98,25 @@ class Cli:
         available_subcommands = [subcomm[0] for subcomm in cli_core.get_methods()]
         # print command help
         log.debug(available_subcommands)
+        print(options)
         if subcommand not in available_subcommands:
-            if subcommand != 'help':
+            if subcommand not in ['--help',  '-h']:
                 log.error(f"Invalid subcommnand {subcommand}")
             self._print_command_help(command, available_subcommands)
             return
 
         cli_core.call_method(subcommand, options)
 
-    def _print_command_help(self, cmd, method_tuples):
+    @staticmethod
+    def _print_command_help(cmd, methods):
         msg = f"\nusage: {NAME} {cmd} <subcommand> [options] \n"\
             "To see help text, you can run: \n"\
             "\n"\
-            f"{NAME} {cmd} help \n"\
-            f"{NAME} {cmd} <subcommand> help \n"\
+            f"{NAME} {cmd} --help \n"\
+            f"{NAME} {cmd} <subcommand> --help \n"\
             "\n"\
             "SUB-COMMANDS: \n"
-        for name, method in method_tuples:
+        for name in methods:
             if not name.startswith('__'):
                 msg = msg + "    " + name + "\n"
         print(msg)
@@ -137,7 +139,7 @@ def main():
         log.error(str(e), exc_info=_print_tracebacks(log_level))
         exit1()
     except Exception as e:
-        log.error("Unexpected error: %s" % str(e),
+        log.error("%s %s", e.__class__.__name__, str(e),
                   exc_info=_print_tracebacks(log_level))
         exit1()
     exit0()
@@ -185,8 +187,8 @@ def check_for_update():
     version = get_installed_version()
     if version != "[local source] no pip module installed":
         if 'dev' not in version:
-            #current_version = get_pip_version(
-            #    f'https://pypi.org/pypi/{NAME}/json')
+            current_version = get_pip_version(
+                f'https://pypi.org/pypi/{NAME}/json')
             if version in current_version:
                 log.info("version %s" % version, extra={"nametag": ''})
             else:

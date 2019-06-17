@@ -58,8 +58,7 @@ class CliCore:
         # By default, all method parameters are required
         arg_parser = argparse.ArgumentParser(
             description=str(method.__doc__),
-            usage=f'%(prog)s {self.module_name.lower()} {method.__name__} [options]',
-            add_help=False
+            usage=f'%(prog)s {self.module_name.lower()} {method.__name__} [options]'
         )
         optional_group = arg_parser._action_groups.pop()
         required_group = arg_parser.add_argument_group('required arguments')

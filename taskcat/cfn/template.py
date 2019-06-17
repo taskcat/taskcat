@@ -2,7 +2,7 @@ import cfnlint
 from pathlib import Path
 from taskcat.client_factory import ClientFactory
 from taskcat.common_utils import s3_url_maker, s3_bucket_name_from_url, s3_key_from_url
-from typing import List, Set
+from typing import List, Set, Optional
 import logging
 import random
 import string
@@ -24,6 +24,8 @@ class Template:
         self.url = url
         self.children: List[Template] = []
         self._find_children()
+        self.template: Optional[Template] = None
+
 
     def __str__(self):
         return str(self.template)
@@ -43,6 +45,10 @@ class Template:
         path = s3_key_from_url(url)
         s3_client = self.client_factory_instance.get('s3')
         s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': [{'Key': path}], 'Quiet': True})
+
+    @property
+    def linesplit(self):
+        return self.raw_template.split('\n')
 
     def write(self):
         """writes raw_template back to file, and reloads decoded template, useful if the template has been modified"""

@@ -3,6 +3,8 @@ import sys
 import os
 import logging
 from pathlib import Path
+import json
+from jsonschema import RefResolver, validate
 from taskcat.exceptions import TaskCatException
 
 log = logging.getLogger(__name__)
@@ -151,3 +153,29 @@ def absolute_path(path: [str, Path]):
     if not path.exists():
         return None
     return path
+
+
+def schema_validate(instance, schema_name):
+    instance_copy = instance.copy()
+    if isinstance(instance_copy, dict):
+        if "tests" in instance_copy.keys():
+            instance_copy["tests"] = tests_to_dict(instance_copy["tests"])
+    schema_path = Path(__file__).parent.absolute() / "cfg"
+    schema = json.load(open(schema_path / f"schema_{schema_name}.json", "r"))
+    validate(
+        instance_copy,
+        schema,
+        resolver=RefResolver(str(schema_path.as_uri()) + "/", None),
+    )
+
+
+def tests_to_dict(tests):
+    rendered_tests = {}
+    for test in tests.keys():
+        rendered_tests[test] = {}
+        for k, v in tests[test].__dict__.items():
+            if not k.startswith("_"):
+                if isinstance(v, Path):
+                    v = str(v)
+                rendered_tests[test][k] = v
+    return rendered_tests

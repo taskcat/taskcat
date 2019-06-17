@@ -5,8 +5,11 @@ from typing import Dict
 import yaml
 from jsonschema import exceptions
 
+from taskcat.client_factory import ClientFactory
 from taskcat.common_utils import absolute_path
 from taskcat.exceptions import TaskCatException
+from taskcat.common_utils import schema_validate as validate
+from taskcat.cfn.template import Template
 
 LOG = logging.getLogger(__name__)
 
@@ -15,10 +18,12 @@ class Test:  # pylint: disable=too-few-public-methods
     def __init__(
         self,
         template_file: Path,
+        name: str = 'default',
         parameter_input: Path = None,
         parameters: dict = None,
         regions: set = None,
         project_root: Path = Path("./"),
+        auth: dict = {}
     ):
         self._project_root: Path = project_root
         self.template_file: Path = self._guess_path(template_file)
@@ -28,8 +33,11 @@ class Test:  # pylint: disable=too-few-public-methods
         ] = self._params_from_file() if parameter_input else {}
         if parameters:
             self.parameters.update(parameters)
-        Config.validate(self.parameters, "overrides")
+        validate(self.parameters, "overrides")
         self.regions = list(regions) if regions else []
+        self.auth: dict = auth
+        self.client_factory: [ClientFactory, None] = None
+        self.name: str = name
 
     def _guess_path(self, path):
         abs_path = absolute_path(path)
@@ -69,7 +77,7 @@ class Test:  # pylint: disable=too-few-public-methods
         params = yaml.safe_load(open(str(self.parameter_input_file), "r"))
         self._validate_params(params)
         try:
-            Config.validate(params, "legacy_parameters")
+            validate(params, "legacy_parameters")
             params = self._convert_legacy_params(params)
         except exceptions.ValidationError:
             pass
@@ -81,10 +89,10 @@ class Test:  # pylint: disable=too-few-public-methods
 
     def _validate_params(self, params):
         try:
-            Config.validate(params, "overrides")
+            validate(params, "overrides")
         except exceptions.ValidationError as e:
             try:
-                Config.validate(params, "legacy_parameters")
+                validate(params, "legacy_parameters")
                 LOG.warning(
                     "%s parameters are in a format that will be deprecated in "
                     "the next version of taskcat",
@@ -97,10 +105,3 @@ class Test:  # pylint: disable=too-few-public-methods
     @classmethod
     def from_dict(cls, raw_test: dict, project_root=Path("./")):
         return Test(**raw_test, project_root=project_root)
-
- class S3BucketConfig(str)
-     def __init__(self, public: bool = False, auto: bool = False)
-        self.region = ""
-        self.publc = public
-        self.auto = auto
-        self.max_name_len = 63
