@@ -1,3 +1,14 @@
+class S3BucketCreator:
+    def __init__(self)
+        self.name = ""
+        self.public = False
+        self.tags = []
+        self.region = 'us-east-1'
+        self.sigv4 = True
+
+    def create(self):
+        pass
+
 def stage_in_s3(self, config: Config):
     """
     Upload templates and other artifacts to s3.
