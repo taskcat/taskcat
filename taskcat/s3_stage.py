@@ -1,15 +1,110 @@
+
+class S3APIResponse:
+    def __init__(self, x):
+        self._http_code = x['ResponseMetadata']['HTTPStatusCode']
+
+    @property
+    def ok(self):
+        if self._http_code == 200:
+            return True
+        return False
+
+class S3BucketCreatorException(Exception):
+    pass
+
 class S3BucketCreator:
-    def __init__(self)
+    def __init__(self, config: Config):
         self.name = ""
         self.public = False
         self.tags = []
         self.region = 'us-east-1'
         self.sigv4 = True
+        self._config = config
+        self._c = None
+
+    @property
+    def acl(self):
+        return self._acl
+
+    @property
+    def policy(self):
+        return self._policy
+
+    def _create_in_region(self, region):
+        if region == 'us-east-1':
+            response = self._c.create_bucket(
+                ACL=self.acl,
+                Bucket=self.name
+            )
+        else:
+            response = self._c.create_bucket(
+                ACL=self.acl,
+                Bucket=self.name,
+                CreateBucketConfiguration={
+                    'LocationConstraint': region
+                }
+            )
+
+        return S3APIResponse(response)
+
+    def _return_sigv4_policy(self, bucket):
+        policy = F"""{
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "Test",
+                    "Effect": "Deny",
+                    "Principal": "*",
+                    "Action": "s3:*",
+                    "Resource": "arn:aws:s3:::{bucket}/*",
+                    "Condition": {
+                         "StringEquals": {
+                               "s3:signatureversion": "AWS"
+                         }
+                    }
+                }
+            ]
+        }"""
 
     def create(self):
-        pass
+        # Verify bucket name length
+        if len(self.name) > self.config.s3_bucket.max_name_len:
+            raise S3BucketCreatorException(f"The bucket you provided [{config.s3_bucket.name}] is greater than {config.s3_bucket.max_name_len} characters.")
 
-def stage_in_s3(self, config: Config):
+        s3_client = config.client_factory.get('s3', region=config.default_region, s3v4=self.sigv4)
+
+        if not config.s3_bucket.name:
+
+            # Verify bucket exists.
+            try:
+                _ = s3_client.list_objects(Bucket=config.s3_bucket.name)
+            except s3_client.exceptions.NoSuchBucket:
+                raise TaskCatException(f"The bucket you provided ({self.name}) does not exist. Exiting.")
+            except Exception:
+                raise
+
+        else:
+            auto_bucket_name = f"taskcat-{self.stack_prefix}-{self.name}-{self.uuid}".lower()
+            log.info(f"Creating bucket {auto_bucket_name} in {self.region}")
+            config.s3_bucket.auto = True
+
+            _create_resp = self._create_in_region(self.region):
+            if _create_resp.ok:
+                log.info(f"Staging Bucket: [{auto_bucket_name}]")
+
+            if self.tags:
+                s3_client.put_bucket_tagging(
+                    Bucket=auto_bucket,
+                    Tagging={"TagSet": self.tags}
+                )
+
+            if self.sigv4:
+                log.info(f"Enforcing sigv4 requests for bucket ${auto_bucket}")
+                policy = self._return_sigv4_policy(self.name)
+                s3_client.put_bucket_policy(Bucket=self.name, Policy=policy)
+
+
+def new_stage_in_s3(self, config: Config):
     """
     Upload templates and other artifacts to s3.
 
@@ -20,105 +115,35 @@ def stage_in_s3(self, config: Config):
     :param config: Taskcat config object.
 
     """
-
-    def _verify_bucket_len(name, length):
-        if len(name) > length:
-            raise TaskCatException(f"The bucket you provided [{config.s3_bucket.name}] is greater than {config.s3_bucket.max_name_len} characters.")
-
-    if config.s3_bucket.public:
-        bucket_object_acl = "public-read"
-    else:
-        bucket_object_acl = "bucket-owner-read"
-
-    #TODO CLIENTFACTORY
-    #TODO config.s3_bucket.name
-    #TODO jobid.
-    s3_client = config.client_factory.get('s3', region=config.default_region, s3v4=True)
+    S3Bucket = S3BucketCreator(config)
 
     if config.s3_bucket.name:
-        # Verify name length constraints.
-        _verify_bucket_len(config.s3_bucket.name, config.s3_bucket.max_name_len)
+      S3Bucket.name = config.s3_bucket.name
 
-        # Verify bucket exists.
-        try:
-            _ = s3_client.list_objects(Bucket=config.s3_bucket.name)
-        except s3_client.exceptions.NoSuchBucket:
-            raise TaskCatException(f"The bucket you provided [{config.s3_bucket.name}] does not exist. Exiting.")
-        except Exception:
-            raise
+    if config.s3_bucket.public:
+      S3Bucket.public = True
 
-        log.info(f"Staging Bucket => {config.s3_bucket.name}")
+    if config.s3_bucket.tags:
+      S3Bucket.tags = config.s3_bucket.tags
 
-    else:
+    if config.default_region != 'us-east-1':
+      S3Bucket.region = config.default_region
 
-        auto_bucket = f"taskcat-{config.stack_prefix}-{config.name}-{self._jobid[:8]".lower()
+    if config.sigv4:
+      S3Bucket.sigv4 = True
 
-        _verify_bucket_len(auto_bucket, config.s3_bucket.max_name_len)
+    try:
+      S3Bucket.create()
+    except Exception as e:
+      raise TaskCatException(e)
 
-        log.info(f"Creating bucket {config.s3_bucket} in {config.default_region}")
-        if config.default_region == 'us-east-1':
-            response = s3_client.create_bucket(
-                    ACL=bucket_object_acl,
-                    Bucket=auto_bucket)
-        else:
-            response = s3_client.create_bucket(
-                    ACL=bucket_object_acl,
-                    CreateBucketConfiguration={
-                        'LocationConstraint': config.default_region
-                        }
-                    )
-        config.s3_bucket.auto = True
+    S3Sync(s3_client,
+           self.get_s3bucket(),
+           self.get_project_name(),
+           self.get_project_path(),
+           bucket_or_object_acl)
 
-        else:
-            raise TaskCatException("Default_region = " + self.get_default_region())
+    # self.s3_url_prefix = "https://" + self.get_s3_hostname() + "/" + self.get_project_name()
 
-        if response['ResponseMetadata']['HTTPStatusCode'] is 200:
-            log.info("Staging Bucket => [%s]" % auto_bucket)
-            self.set_s3bucket(auto_bucket)
-        else:
-            log.info('Creating bucket {0} in {1}'.format(auto_bucket, self.get_default_region()))
-            response = s3_client.create_bucket(ACL=bucket_or_object_acl,
-                                               Bucket=auto_bucket,
-                                               CreateBucketConfiguration={
-                                                   'LocationConstraint': self.get_default_region()})
-
-            if response['ResponseMetadata']['HTTPStatusCode'] is 200:
-                log.info("Staging Bucket => [%s]" % auto_bucket)
-                self.set_s3bucket(auto_bucket)
-        if self.tags:
-            s3_client.put_bucket_tagging(
-                Bucket=auto_bucket,
-                Tagging={"TagSet": self.tags}
-            )
-        if not self.enable_sig_v2:
-            print(PrintMsg.INFO + "Enforcing sigv4 requests for bucket %s" % auto_bucket)
-            policy = """{
-"Version": "2012-10-17",
-"Statement": [
-     {
-           "Sid": "Test",
-           "Effect": "Deny",
-           "Principal": "*",
-           "Action": "s3:*",
-           "Resource": "arn:aws:s3:::%s/*",
-           "Condition": {
-                 "StringEquals": {
-                       "s3:signatureversion": "AWS"
-                 }
-           }
-     }
-]
-}
-""" % auto_bucket
-            s3_client.put_bucket_policy(Bucket=auto_bucket, Policy=policy)
-
-    for exclude in self.get_exclude():
-        if os.path.isdir(exclude):
-            S3Sync.exclude_path_prefixes.append(exclude)
-        else:
-            S3Sync.exclude_files.append(exclude)
-
-    S3Sync(s3_client, self.get_s3bucket(), self.get_project_name(), self.get_project_path(), bucket_or_object_acl)
-    self.s3_url_prefix = "https://" + self.get_s3_hostname() + "/" + self.get_project_name()
     if self.upload_only:
-    exit0("Upload completed successfully")
+        exit0("Upload completed successfully")
