@@ -1,12 +1,15 @@
 # flake8: noqa B950,F841
 import logging
-from taskcat._config import Config
-from taskcat._cfn.threaded import Stacker
-from taskcat._s3_stage import stage_in_s3
 
+from taskcat._cfn.threaded import Stacker
+from taskcat._cfn_lint import Lint as TaskCatLint
+from taskcat._config import Config
+from taskcat._s3_stage import stage_in_s3
+from taskcat.exceptions import TaskCatException
 
 LOG = logging.getLogger(__name__)
-#LOG.name = "[taskcat]"
+# LOG.name = "[taskcat]"
+
 
 class Test:
     """
@@ -23,10 +26,15 @@ class Test:
         config = Config(
             project_root=project_root,
             # TODO detect if input file is taskcat config or CloudFormation template
-            project_config_path=input_file
+            project_config_path=input_file,
         )  # pylint: disable=unused-variable
         # 1. build lambdas
         # 2. lint
+        lint = TaskCatLint(config, strict=False)
+        errors = lint.lints[1]
+        lint.output_results()
+        if errors or not lint.passed:
+            raise TaskCatException("Lint failed with errors")
         # 3. s3 sync
         stage_in_s3(config)
         # 4. validate
@@ -39,7 +47,9 @@ class Test:
             test_definition.create_stacks()
 
             for stack in test_definition.stacks:
-                LOG.info(f"Launching test_definition: {stack.name} in Region: {stack.region_name}")
+                LOG.info(
+                    f"Launching test_definition: {stack.name} in Region: {stack.region_name}"
+                )
         # 6. wait for completion
         # 7. delete stacks
         # 8. create report
