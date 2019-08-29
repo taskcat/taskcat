@@ -8,7 +8,7 @@ with open("README.md", "r") as fh:
 
 setup(
     version="0.9.0",
-    name="taskcat-v9",
+    name="taskcat",
     packages=["taskcat"],
     description="An OpenSource Cloudformation Deployment Framework",
     long_description=LONG_DESCRIPTION,

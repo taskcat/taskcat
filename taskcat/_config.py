@@ -40,9 +40,9 @@ class Config:  # pylint: disable=too-many-instance-attributes,too-few-public-met
     def __init__(  # pylint: disable=too-many-statements
         self,
         args: Optional[dict] = None,
-        global_config_path: str = "~/.taskcat.yml",
-        project_config_path: str = None,
-        project_root: str = "./",
+        global_config_path: Union[str, Path] = "~/.taskcat.yml",
+        project_config_path: Union[str, Path] = None,
+        project_root: Union[str, Path] = "./",
         override_file: str = None,  # pylint: disable=unused-argument
         all_env_vars: Optional[List[dict]] = None,
         create_clients: bool = True,
