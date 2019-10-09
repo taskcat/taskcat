@@ -26,8 +26,10 @@ class UpdateAMI:
         # Stripping out any test-specific regions/auth.
         config_dict = c.config.to_dict()
         for test_name, test_config in config_dict['tests'].items():
-            del test_config['auth']
-            del test_config['regions']
+            if test_config.get('auth', None):
+                del test_config['auth']
+            if test_config.get('regions', None):
+                del test_config['regions']
         new_config = Config.create(**config_obj_args, args=config_dict)
 
         # Fetching the region objects.
