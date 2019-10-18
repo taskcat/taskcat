@@ -8,6 +8,7 @@ import string
 import sys
 from pathlib import Path
 from typing import Optional, Union
+from functools import reduce
 
 import boto3
 
@@ -199,3 +200,11 @@ def merge_nested_dict(old, new):
             merge_nested_dict(old[k], v)
         else:
             old[k] = v
+
+def deep_get(dictionary, keys, default=None):
+    zulu = reduce(
+        lambda d, key: d.get(key, default) if isinstance(d, dict) else default,
+        keys.split("/"),
+        dictionary,
+    )
+    return zulu

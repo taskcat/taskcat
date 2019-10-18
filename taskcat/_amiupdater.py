@@ -2,65 +2,108 @@
 # type: ignore
 # TODO: fix lint issues
 # pylint: skip-file
-
 import collections
 import datetime
 import json
 import logging
 import os
 import re
-from functools import reduce
 from multiprocessing.dummy import Pool as ThreadPool
+from functools import partial
 
 import pkg_resources
 import requests
 import yaml
 
-from taskcat._client_factory import ClientFactory
-from taskcat._utils import CFNYAMLHandler as cfy
+from taskcat._common_utils import deep_get
+from dataclasses import dataclass, field
 
 LOG = logging.getLogger(__name__)
 
-
 class AMIUpdaterException(Exception):
     """Raised when AMIUpdater experiences a fatal error"""
-
     pass
 
+def build_codenames(tobj, config):
+    """Builds regional codename objects"""
 
-class APIResultsData(object):
-    results = []
+    def _construct_filters(cname):
+        formatted_filters = []
+        fetched_filters = config.get_filter(cname)
+        formatted_filters = [
+            {"Name": k, "Values": [v]} for k,v in fetched_filters.items()
+        ]
+        if formatted_filters:
+            formatted_filters.append({"Name": "state", "Values": ["available"]})
+        return formatted_filters
 
-    def __init__(
-        self,
-        codename,
-        ami_id,
-        creation_date,
-        region,
-        custom_comparisons=True,
-        *args,
-        **kwargs,
-    ):
-        self.codename = codename
-        self.ami_id = ami_id
-        self.creation_date = creation_date
-        self.region = region
-        self.custom_comparisons = custom_comparisons
+    built_cn = []
+    filters = deep_get(tobj.underlying.template, tobj.metadata_path, default=dict())
+    mappings = deep_get(tobj.underlying.template, tobj.mapping_path, default=dict())
 
-    def __lt__(self, other):
-        # See Codenames.parse_api_results for notes on why this is here.
-        if self.custom_comparisons:
-            return self.creation_date < other.creation_date
-        else:
-            return object.__lt__(self, other)
+    for cname, cfilters in filters.items():
+        config.update_filters({cname: cfilters})
 
-    def __gt__(self, other):
-        # See Codenames.parse_api_results for notes on why this is here.
-        if self.custom_comparisons:
-            return self.creation_date > other.creation_date
-        else:
-            return object.__gt__(self, other)
+    for region, cndata in mappings.items():
+        if region == 'AMI':
+            continue
+        for cnname in cndata.keys():
+            _filters = _construct_filters(cnname)
+            region_cn = RegionalCodename(region=region, cn=cnname, filters=_filters)
+            built_cn.append(region_cn)
+    return built_cn
 
+def query_codenames(codename_list, region_dict):
+    """Fetches AMI IDs from AWS"""
+
+    if len(codename_list) == 0:
+        raise AMIUpdaterException(
+            "No AMI filters were found. Nothing to fetch from the EC2 API."
+        )
+
+    def _per_codename_amifetch(region_dict, regional_cn):
+        image_results = region_dict.get(regional_cn.region).client('ec2').describe_images(
+                Filters=regional_cn.filters)['Images']
+        return {'region': regional_cn.region, "cn": regional_cn.cn, "api_results": image_results}
+
+    pool = ThreadPool(len(region_dict))
+    p = partial(_per_codename_amifetch, region_dict)
+    response = pool.map(p, codename_list)
+
+def reduce_api_results(raw_results):
+    def _image_timestamp(raw_ts):
+        ts_int = datetime.datetime.strptime(raw_ts, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+        return int(ts_int)
+
+    unsorted_results = []
+    sorted_results = []
+    final_results = []
+    result_state = {}
+
+    for thread_result in raw_results:
+        for cn_result in thread_result:
+            if cn_result:
+                _t = unsorted_results_dict.get(cn_result['region'])
+                cn_api_reuslts_data =[ APIResultsData(
+                        cn_result['cn'],
+                        x['ImageId'],
+                        _image_timestamp(x['CreationDate']),
+                        cn_result['region']
+                    ) for x in cn_result['api_results']
+                ]
+
+                unsorted_results = cn_api_results_data + unsorted_results
+
+    sorted_results = unsorted_results.sort()
+
+    for r in sorted_results:
+        found_key = f"{r['region']}-{r['cn']}"
+        already_found = result_state.get(found_key, False)
+        if already_found:
+            continue
+        result_state[found_key] = True
+        final_results.append(r)
+    return final_results
 
 class Config:
     raw_dict = {"global": {"AMIs": {}}}
@@ -77,6 +120,7 @@ class Config:
         try:
             for x in cls.raw_dict.get("global").get("AMIs").keys():
                 cls.codenames.add(x)
+
         except Exception as e:
             LOG.error("{} config file [{}] is not structured properly!", configtype, fn)
             LOG.error("{}", e)
@@ -86,330 +130,89 @@ class Config:
     def update_filter(cls, dn):
         cls.raw_dict["global"]["AMIs"].update(dn)
 
+    @classmethod
+    def get_filter(cls, dn):
+        x = deep_get(cls.raw_dict, f"global/AMIs/{dn}")
+        return x
 
-class Codenames:
-    filters = None
-    _objs = {}
-    _no_filters = {}
+@dataclass
+class APIResultsData(object):
+    codename = ''
+    ami_id = ''
+    creation_date = ''
+    region = ''
+    custom_comparisons=True
 
-    def __new__(cls, *args, **kwargs):
-        if args[0] in cls._objs.keys():
-            instance = cls._objs.get(args[0])
-            if args[0] in cls._no_filters.keys():
-                del cls._no_filters[args[0]]
-        elif args[0] in cls._no_filters.keys():
-            instance = cls._objs.get(args[0])
+    def __lt__(self, other):
+        # See Codenames.parse_api_results for notes on why this is here.
+        if self.custom_comparisons:
+            return self.creation_date < other.creation_date
         else:
-            instance = super(Codenames).__init__(cls)
-        return instance
+            return object.__lt__(self, other)
 
-    def __init__(self, cn, *args, **kwargs):
-        self.cn = cn
-        self._regions = set()
-        self._region_data = set()
-        if self._create_codename_filters():
-            self._objs[cn] = self
+    def __gt__(self, other):
+        # See Codenames.parse_api_results for notes on why this is here.
+        if self.custom_comparisons:
+            return self.creation_date > other.creation_date
         else:
-            self._no_filters[cn] = self
-
-    def _create_codename_filters(self):
-        # I'm grabbing the filters from the config file, and adding them to
-        # self.filters; The RegionalCodename instance can access this value. That's
-        # important for threading the API queries - which we do.
-        cnfilter = TemplateClass.deep_get(
-            Config.raw_dict, "global/AMIs/{}".format(self.cn)
-        )
-        if self._filters:
-            cnfilter = self._filters
-        if cnfilter:
-            self.filters = [{"Name": k, "Values": [v]} for k, v in cnfilter.items()]
-            self.filters.append({"Name": "state", "Values": ["available"]})
-        if not self.filters:
-            return None
-        return True
-
-    def regions(self):
-        return list(self._regions)
-
-    @classmethod
-    def objects(cls):
-        return list(cls._objs.values())
-
-    @classmethod
-    def unknown_mappings(cls):
-        return cls._no_filters.keys()
-
-    @classmethod
-    def fetch_latest_amis(cls):
-        """Fetches AMI IDs from AWS"""
-        # This is a wrapper for the threaded run.
-        # Create a ThreadPool, size is the number of regions.
-
-        if len(RegionalCodename.objects()) == 0:
-            raise AMIUpdaterException(
-                "No AMI filters were found. Nothing to fetch from the EC2 API."
-            )
-
-        pool = ThreadPool(len(TemplateClass.regions()))
-        # For reach RegionalCodename that we've generated....
-        pool.map(cls._per_rcn_ami_fetch, RegionalCodename.objects())
-
-    @classmethod
-    def _per_rcn_ami_fetch(cls, rcn):
-        rcn.results = AMIUpdater.client_factory.get("ec2", rcn.region).describe_images(
-            Filters=rcn.filters
-        )["Images"]
-
-    @classmethod
-    def parse_api_results(cls):
-        raw_ami_names = {}
-        region_codename_result_list = []
-        missing_results_list = []
-
-        # For each RegionalCodename.
-        #     Create a Dictionary like so:
-        #     CODENAME
-        #       - REGION_NAME
-        #           [{RAW_API_RESULTS_1}, {RAW_API_RESULTS_2}, {RAW_API_RESULTS_N}]
-        for rcn in RegionalCodename.objects():
-            if rcn.cn in raw_ami_names.keys():
-                raw_ami_names[rcn.cn][rcn.region] = [
-                    APIResultsData(
-                        rcn.cn,
-                        x["ImageId"],
-                        int(
-                            datetime.datetime.strptime(
-                                x["CreationDate"], "%Y-%m-%dT%H:%M:%S.%fZ"
-                            ).timestamp()
-                        ),
-                        rcn.region,
-                    )
-                    for x in rcn.results
-                ]
-            else:
-                raw_ami_names.update(
-                    {
-                        rcn.cn: {
-                            rcn.region: [
-                                APIResultsData(
-                                    rcn.cn,
-                                    x["ImageId"],
-                                    int(
-                                        datetime.datetime.strptime(
-                                            x["CreationDate"], "%Y-%m-%dT%H:%M:%S.%fZ"
-                                        ).timestamp()
-                                    ),
-                                    rcn.region,
-                                )
-                                for x in rcn.results
-                            ]
-                        }
-                    }
-                )
-
-        for codename, regions in raw_ami_names.items():
-            for region, results_list in regions.items():
-                if len(results_list) == 0:
-                    missing_results_list.append((codename, region))
-                    continue
-                latest_ami = sorted(results_list, reverse=True)[0]
-                latest_ami.custom_comparisons = False
-                region_codename_result_list.append(latest_ami)
-        if missing_results_list:
-            for code_reg in missing_results_list:
-                LOG.error(
-                    f"The following Codename / Region  had no results from the EC2 "
-                    f"API. {code_reg}"
-                )
-            raise AMIUpdaterException(
-                "One or more filters returns no results from the EC2 API."
-            )
-        APIResultsData.results = region_codename_result_list
+            return object.__gt__(self, other)
 
 
-class RegionalCodename(Codenames):
-    _x = {}
+@dataclass
+class RegionalCodename:
+    region: str
+    cn: str
+    new_ami: str = field(default_factory=str)
+    filters: list = field(default_factory=list)
+    _creation_dt = datetime.datetime.now()
 
-    def __new__(cls, *args, **kwargs):
-        # A word on this.
-        # - An instance of RegionalCodename is a representation of CODENAME and AMINAME.
-        # Since this module allows for multiple templates, *and* interrogates all
-        # templates at once, there's a risk I could end up with multiple
-        # instantations for each CODENAME/AMINAME combination. I maintain a
-        # dictionary of CODENAMEREGION -> Instance mappings, so if this class is
-        # instantated with the same arguments twice, the exact same memory pointer is
-        # returned.
-        try:
-            region = kwargs.get("region")
-            cn = kwargs.get("cn")
-        except KeyError:
-            raise
-        k = "{}{}".format(cn, region)
-        if k in cls._x.keys():
-            instance = cls._x.get(k)
-        else:
-            instance = super(Codenames, cls).__new__(cls)
-            cls._x[k] = instance
-        return instance
+    def __hash__(self):
+        return hash(self.region+self.cn+ self.new_ami+str(self.filters))
 
-    @classmethod
-    def objects(cls):
-        return [z for z in cls._x.values() if z.filters]
-
-    def __init__(self, cn, region, filters=None, *args, **kwargs):
-        self.region = region
-        self.results = None
-        self._filters = filters
-        super(RegionalCodename, self).__init__(cn, region, *args, **kwargs)
-
-
-class TemplateClass(object):
+@dataclass
+class Template:
+    #TODO: Type these
+    codenames = set()
     mapping_path = "Mappings/AWSAMIRegionMap"
     metadata_path = "Metadata/AWSAMIRegionMap/Filters"
-    template_ext = [".template", ".json", ".yaml", ".yml"]
-    _regions = set()
-    _codenames = set()
+    region_codename_lineno = {}
+    region_names = set()
+    underlying: ''
 
-    @staticmethod
-    def deep_get(dictionary, keys, default=None):
-        zulu = reduce(
-            lambda d, key: d.get(key, default) if isinstance(d, dict) else default,
-            keys.split("/"),
-            dictionary,
-        )
-        return zulu
+    def configure(self):
+        self._configure_region_names()
+        self._ls = self.underlying.linesplit
 
-    @staticmethod
-    def deep_set(dictionary, keys, value):
-        for key in keys.split("/")[:-1]:
-            dictionary = dictionary.setdefault(key, {})
+    def set_codename_ami(self, cname, region, new_ami):
+        if region not in region_names:
+            return
+        key = f"{cname}/{region}"
+        try:
+            line_no = self.regional_codename_lineno[key]['line']
+            old_ami = self.regional_codename_lineno[key]['old']
+        except KeyError:
+            return
+        new_record = re.sub(old_ami, ami, self._ls[line_no-1])
+        self._ls[line_no-1] = new_record
 
-    @classmethod
-    def regions(cls):
-        return [x for x in list(cls._regions) if x != "AMI"]
-
-    @staticmethod
-    def _fetch_contents(filename):
-        """Loads the template to inspect"""
-        with open(filename) as f:
-            tfdata = f.read()
-        stripped_tfdata = tfdata.strip()
-        if stripped_tfdata[0] in ["{", "["] and stripped_tfdata[-1] in ["}", "]"]:
-            filetype = "json"
-            loaded_template_data = json.loads(
-                tfdata, object_pairs_hook=collections.OrderedDict
-            )
-        else:
-            filetype = "yaml"
-            loaded_template_data = cfy.ordered_safe_load(
-                open(filename, "rU"), object_pairs_hook=collections.OrderedDict
-            )
-        return filetype, loaded_template_data, tfdata
-
-
-class TemplateObject(TemplateClass):
-    _objs = []
-    replacement_ami_map = {}
-
-    @classmethod
-    def objects(cls):
-        return cls._objs
-
-    def __init__(self, filename, all_regions=False):
-        self._filename = filename
-        self.filetype, self._contents, self._raw = self._fetch_contents(filename)
-        self._mapping_root = self.deep_get(self._contents, self.mapping_path)
-        self.filter_metadata = self.deep_get(self._contents, self.metadata_path)
-        self.all_regions = all_regions
-        self.filters = None
-        self.codename = None
-
-        # This is where we know the instantation is good (we've passed sanity checks).
-        # Looking for Mappings/AWSAMIRegionMap
-        if not self._mapping_root:
-            return None
-
-        # Sort out what regions are being used.
-        self._determine_regions()
-
-        # Appending the object so it can be referenced later.
-        self._objs.append(self)
-
-        # Generate RegionalCodename filters based on what's in the template.
-        self._generate_regional_codenames()
-
-    def _generate_regional_codenames(self):
-        for region in self._regions:
-            if region == "AMI":
+    def _configure_region_names(self):
+        _template_regions = deep_get(self.underlying.template, self.mapping_path, {})
+        for region_name, region_data in _template_regions.items():
+            if region_name == "AMI":
                 continue
-            if self.filter_metadata:
-                for k in self.filter_metadata.keys():
-                    RegionalCodename(
-                        cn=k, region=region, filters=self.filter_metadata[k]
-                    )
-            else:
-                # Region Name, Latest AMI Name in Template
-                # - We instantiate them in the RegionalCodename class
-                #   because it allows us to access the attributes as an object.
-                #   It also generates the Filters needed in each API call.
-                #   - This is done in the Codenames class, so check that out.
-                try:
-                    for k in self._mapping_root[region].keys():
-                        RegionalCodename(cn=k, region=region)
-                except KeyError:
-                    pass
-
-    def _determine_regions(self):
-        self._region_list = []
-        _ec2_regions = AMIUpdater.client_factory.get(
-            "ec2", "us-east-1"
-        ).describe_regions()["Regions"]
-        for _ec2r in _ec2_regions:
-            self._region_list.append(_ec2r["RegionName"])
-        if self.all_regions:
-            for region in self._region_list:
-                self._regions.add(region)
-        else:
-            # Use the regions that are in Mappings/AWSAMIRegionMap
-            for region in self._mapping_root.keys():
-                if region == "AMI":
-                    continue
-                if region not in self._region_list:
-                    if region in AMIUpdater.EXCLUDED_REGIONS:
-                        LOG.error(
-                            f"The {region} region is currently unsupported. AMI IDs "
-                            f"will not be updated for this region."
-                        )
-                    else:
-                        raise AMIUpdaterException(
-                            "Template: [{}] Region: [{}] is not a valid region".format(
-                                self._filename, region
-                            )
-                        )
-                self._regions.add(region)
-
-    def set_region_ami(self, cn, region, ami_id):
-        currvalue = (
-            self._contents["Mappings"]["AWSAMIRegionMap"]
-            .get(region, None)
-            .get(cn, None)
-        )
-        if currvalue:
-            self.replacement_ami_map[currvalue] = ami_id
-
-    def rotate_ami_id(self, old_ami, new_ami):
-        self._raw = re.sub(old_ami, new_ami, self._raw)
+            self.region_names.add(region_name)
+            for codename, cnvalue in region_data.items():
+                key = f"{codename}/{region_name}"
+                self.region_codename_lineno[key] = {
+                        'line': codename.start_mark.line,
+                        'old': cnvalue
+                        }
 
     def write(self):
-        for old_ami, new_ami in self.replacement_ami_map.items():
-            self.rotate_ami_id(old_ami, new_ami)
-
-        with open(self._filename, "w") as updated_template:
-            updated_template.write(self._raw)
-
+        self.underlying.raw_template = "\n".join(self._ls)
+        self.underlying.write()
 
 class AMIUpdater:
-    client_factory = None
     upstream_config_file = pkg_resources.resource_filename(
         "taskcat", "/cfg/amiupdater.cfg.yml"
     )
@@ -426,37 +229,17 @@ class AMIUpdater:
 
     def __init__(
         self,
-        path_to_templates,
+        template_list,
+        regions,
         user_config_file=None,
         use_upstream_mappings=True,
-        client_factory=None,
     ):
-        if client_factory:
-            AMIUpdater.client_factory = client_factory
-        else:
-            AMIUpdater.client_factory = ClientFactory()
-        self.all_regions = False
         if use_upstream_mappings:
             Config.load(self.upstream_config_file, configtype="Upstream")
         if user_config_file:
             Config.load(user_config_file, configtype="User")
-        self._template_path = path_to_templates
-
-    def _load_config_file(self):
-        """Loads the AMIUpdater Config File"""
-        with open(self._user_config_file) as f:
-            config_contents = yaml.safe_load(f)
-        self.config = config_contents
-
-    def _fetch_template_files(self):
-        p = self._template_path
-        if os.path.isfile(p):
-            yield p
-        elif os.path.isdir(p):
-            for dirpath, _, file_names in os.walk(p):
-                for fn in file_names:
-                    if fn.endswith(tuple(TemplateClass.template_ext)):
-                        yield os.path.join(dirpath, fn)
+        self.template_list = template_list
+        self.regions = regions
 
     @classmethod
     def check_updated_upstream_mapping_spec(cls):
@@ -470,40 +253,60 @@ class AMIUpdater:
             with open(cls.upstream_config_file) as f:
                 f.write(r.content)
 
+
+    #TODO FIXME
     def list_unknown_mappings(self):
-        for template_file in self._fetch_template_files():
-            TemplateObject(template_file)
-
-        unknown_mappings = Codenames.unknown_mappings()
-        if unknown_mappings:
-            LOG.warning(
-                "The following mappings are unknown to AMIUpdater. Please investigate"
-            )
-            for unknown_map in unknown_mappings:
-                LOG.warning(unknown_map)
-
+        pass
+#        for template_file in self._fetch_template_files():
+#            TemplateObject(template_file)
+#
+#        unknown_mappings = Codenames.unknown_mappings()
+#        if unknown_mappings:
+#            LOG.warning(
+#                "The following mappings are unknown to AMIUpdater. Please investigate"
+#            )
+#            for unknown_map in unknown_mappings:
+#                LOG.warning(unknown_map)
+#
     def update_amis(self):
-        for template_file in self._fetch_template_files():
-            # Loads each template as an object.
-            TemplateObject(template_file)
-        LOG.info("Created all filters necessary for the API calls")
-        # Fetches latest AMI IDs from the API.
-        # Determines the most common AMI names across all regions
-        # Sorts the AMIs by creation date, results go into APIResultsData.results.
-        # See APIResultsData class and Codenames.parse_api_results function for details.
-        Codenames.fetch_latest_amis()
-        LOG.info("Latest AMI IDs fetched")
-        Codenames.parse_api_results()
-        LOG.info("API results parsed")
+        templates = []
+        regions = []
+        codenames = set()
+        _regions_with_creds = self.regions.keys()
 
-        for template_object in TemplateObject.objects():
-            for result in APIResultsData.results:
-                template_object.set_region_ami(
-                    result.codename, result.region, result.ami_id
-                )
+        LOG.info("Determining templates and supported regions")
+        # Flush out templates and supported regions
+        for tc_template in self.template_list:
+            _t = Template(underlying=tc_template)
+            _t.configure()
+            _new_region_list = []
+            for region in _t.region_names:
+                if (region in self.EXCLUDED_REGIONS) and (region not in _regions_with_creds):
+                    continue
+                _new_region_list.append(region)
+                _t.region_names = set(_new_region_list)
+            templates.append(_t)
 
-        # For each template, write it to disk.
-        for template_object in TemplateObject.objects():
-            template_object.write()
-        LOG.info("{} Templates updated as necessary")
-        LOG.info("{} Complete!")
+        LOG.info("Determining regional search params for each AMI")
+        # Flush out codenames.
+        for template in templates:
+            template_cn = build_codenames(template, Config)
+            for tcn in template_cn:
+                codenames.add(tcn)
+
+        # Retrieve API Results.
+        LOG.info("Retreiving results from the EC2 API")
+        results = query_codenames(codenames, self.regions)
+
+        LOG.info("Determining the latest AMI for each Codename/Region")
+        updated_ami_results = reduce_api_results(results)
+
+        # Figure out a way to sort dictionary by key-value (timestmap)
+
+        LOG.info("Templates updated as necessary")
+        for template in templates:
+            for codename in updated_api_results:
+                template.set_codename_ami(codename.cn, codename.region, codename.new_ami)
+            template.write()
+
+        LOG.info("Complete!")
