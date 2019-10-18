@@ -8,20 +8,20 @@ import json
 import logging
 import os
 import re
-from functools import reduce
 from multiprocessing.dummy import Pool as ThreadPool
+from functools import partial
 
 import pkg_resources
 import requests
 import yaml
 
-from taskcat._client_factory import ClientFactory
 from taskcat._common_utils import deep_get
+from dataclasses import dataclass, field
 
 LOG = logging.getLogger(__name__)
 
 class AMIUpdaterException(Exception):
-    """Raised when AMIUpdater experiences a fatal error"""\
+    """Raised when AMIUpdater experiences a fatal error"""
     pass
 
 def build_codenames(tobj, config):
@@ -29,28 +29,31 @@ def build_codenames(tobj, config):
 
     def _construct_filters(cname):
         formatted_filters = []
-        retreived_filters = config.get_filter(cname)
+        fetched_filters = config.get_filter(cname)
         formatted_filters = [
-            {"Name": k, "Values": [v]} for k,v in retrieved_filters.items()
+            {"Name": k, "Values": [v]} for k,v in fetched_filters.items()
         ]
-        formatted_filters.append[{"Name": "state", "Values": ["available"]})
+        if formatted_filters:
+            formatted_filters.append({"Name": "state", "Values": ["available"]})
         return formatted_filters
 
     built_cn = []
-    filters = deep_get(tobj.underlying.template, tobj.metadata_path)
-    mappings = deep_get(tobj.underlying.template, tobj.mapping_path)
+    filters = deep_get(tobj.underlying.template, tobj.metadata_path, default=dict())
+    mappings = deep_get(tobj.underlying.template, tobj.mapping_path, default=dict())
 
-    for cname, cfilters in filters.items()
-        config.update({cname: cfilters})
+    for cname, cfilters in filters.items():
+        config.update_filters({cname: cfilters})
 
     for region, cndata in mappings.items():
+        if region == 'AMI':
+            continue
         for cnname in cndata.keys():
             _filters = _construct_filters(cnname)
             region_cn = RegionalCodename(region=region, cn=cnname, filters=_filters)
             built_cn.append(region_cn)
     return built_cn
 
-def query_codenames(codename_list, region_list):
+def query_codenames(codename_list, region_dict):
     """Fetches AMI IDs from AWS"""
 
     if len(codename_list) == 0:
@@ -58,42 +61,49 @@ def query_codenames(codename_list, region_list):
             "No AMI filters were found. Nothing to fetch from the EC2 API."
         )
 
-    def _per_codename_amifetch(regional_cn):
-        regional_cn.results = region_dict.get(regional_cn.region).client('ec2').describe_images(
+    def _per_codename_amifetch(region_dict, regional_cn):
+        image_results = region_dict.get(regional_cn.region).client('ec2').describe_images(
                 Filters=regional_cn.filters)['Images']
+        return {'region': regional_cn.region, "cn": regional_cn.cn, "api_results": image_results}
 
-    pool = ThreadPool(len(region_list))
-    pool.map(_per_codename_amifetch, codename_list)
+    pool = ThreadPool(len(region_dict))
+    p = partial(_per_codename_amifetch, region_dict)
+    response = pool.map(p, codename_list)
 
-def reduce_api_results(codename_list):
+def reduce_api_results(raw_results):
     def _image_timestamp(raw_ts):
         ts_int = datetime.datetime.strptime(raw_ts, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
         return int(ts_int)
 
-    raw_ami_names = {}
-    region_codename_result_list = []
-    missing_results_list = []
+    unsorted_results = []
+    sorted_results = []
+    final_results = []
+    result_state = {}
 
-    # For each RegionalCodename.
-    #     Create a Dictionary like so:
-    #     CODENAME
-    #       - REGION_NAME
-    #           [{RAW_API_RESULTS_1}, {RAW_API_RESULTS_2}, {RAW_API_RESULTS_N}]
-    for rcn in codename_list:
-        objectified_results = [
-            APIResultsData(
-                rcn.cn,
-                x['ImageId'],
-                _image_timestamp(x['CreationDate']),
-                rcn.region
-            ) for x in rcn.results
-        ]
+    for thread_result in raw_results:
+        for cn_result in thread_result:
+            if cn_result:
+                _t = unsorted_results_dict.get(cn_result['region'])
+                cn_api_reuslts_data =[ APIResultsData(
+                        cn_result['cn'],
+                        x['ImageId'],
+                        _image_timestamp(x['CreationDate']),
+                        cn_result['region']
+                    ) for x in cn_result['api_results']
+                ]
 
-        rcn_cn_data = raw_ami_names.get(rcn.cn, None)
-        if rcn_cn_data:
-            raw_ami_names[rcn.cn][rcn.region] = objectified_results
-        else:
-            raw_ami_names.update({rcn.cn: {rcn.region: objectified_results}})
+                unsorted_results = cn_api_results_data + unsorted_results
+
+    sorted_results = unsorted_results.sort()
+
+    for r in sorted_results:
+        found_key = f"{r['region']}-{r['cn']}"
+        already_found = result_state.get(found_key, False)
+        if already_found:
+            continue
+        result_state[found_key] = True
+        final_results.append(r)
+    return final_results
 
 class Config:
     raw_dict = {"global": {"AMIs": {}}}
@@ -125,51 +135,6 @@ class Config:
         x = deep_get(cls.raw_dict, f"global/AMIs/{dn}")
         return x
 
-class Codenames:
-    filters = None
-    _objs = {}
-    _no_filters = {}
-
-
-    def _create_codename_filters(self):
-        # I'm grabbing the filters from the config file, and adding them to
-        # self.filters; The RegionalCodename instance can access this value. That's
-        # important for threading the API queries - which we do.
-        cnfilter = TemplateClass.deep_get(
-            Config.raw_dict, "global/AMIs/{}".format(self.cn)
-        )
-        if self._filters:
-            cnfilter = self._filters
-        if cnfilter:
-        if not self.filters:
-            return None
-        return True
-
-    @classmethod
-    def unknown_mappings(cls):
-        return cls._no_filters.keys()
-
-
-        for codename, regions in raw_ami_names.items():
-            for region, results_list in regions.items():
-                if len(results_list) == 0:
-                    missing_results_list.append((codename, region))
-                    continue
-                latest_ami = sorted(results_list, reverse=True)[0]
-                latest_ami.custom_comparisons = False
-                region_codename_result_list.append(latest_ami)
-        if missing_results_list:
-            for code_reg in missing_results_list:
-                LOG.error(
-                    f"The following Codename / Region  had no results from the EC2 "
-                    f"API. {code_reg}"
-                )
-            raise AMIUpdaterException(
-                "One or more filters returns no results from the EC2 API."
-            )
-        APIResultsData.results = region_codename_result_list
-
-
 @dataclass
 class APIResultsData(object):
     codename = ''
@@ -195,12 +160,14 @@ class APIResultsData(object):
 
 @dataclass
 class RegionalCodename:
-    region = ''
-    cn = ''
-    new_ami = ''
-    filters = []
+    region: str
+    cn: str
+    new_ami: str = field(default_factory=str)
+    filters: list = field(default_factory=list)
     _creation_dt = datetime.datetime.now()
 
+    def __hash__(self):
+        return hash(self.region+self.cn+ self.new_ami+str(self.filters))
 
 @dataclass
 class Template:
@@ -229,7 +196,7 @@ class Template:
         self._ls[line_no-1] = new_record
 
     def _configure_region_names(self):
-        _template_regions = deep_get(self.underlying.template, self.mapping_path)
+        _template_regions = deep_get(self.underlying.template, self.mapping_path, {})
         for region_name, region_data in _template_regions.items():
             if region_name == "AMI":
                 continue
@@ -271,14 +238,8 @@ class AMIUpdater:
             Config.load(self.upstream_config_file, configtype="Upstream")
         if user_config_file:
             Config.load(user_config_file, configtype="User")
-        self._template_path = path_to_templates
-
-    def _load_config_file(self):
-        """Loads the AMIUpdater Config File"""
-        with open(self._user_config_file) as f:
-            config_contents = yaml.safe_load(f)
-        self.config = config_contents
-
+        self.template_list = template_list
+        self.regions = regions
 
     @classmethod
     def check_updated_upstream_mapping_spec(cls):
@@ -295,22 +256,23 @@ class AMIUpdater:
 
     #TODO FIXME
     def list_unknown_mappings(self):
-        for template_file in self._fetch_template_files():
-            TemplateObject(template_file)
-
-        unknown_mappings = Codenames.unknown_mappings()
-        if unknown_mappings:
-            LOG.warning(
-                "The following mappings are unknown to AMIUpdater. Please investigate"
-            )
-            for unknown_map in unknown_mappings:
-                LOG.warning(unknown_map)
-
+        pass
+#        for template_file in self._fetch_template_files():
+#            TemplateObject(template_file)
+#
+#        unknown_mappings = Codenames.unknown_mappings()
+#        if unknown_mappings:
+#            LOG.warning(
+#                "The following mappings are unknown to AMIUpdater. Please investigate"
+#            )
+#            for unknown_map in unknown_mappings:
+#                LOG.warning(unknown_map)
+#
     def update_amis(self):
         templates = []
         regions = []
         codenames = set()
-        _regions_with_creds = [r.region_name for r in self.regions]
+        _regions_with_creds = self.regions.keys()
 
         LOG.info("Determining templates and supported regions")
         # Flush out templates and supported regions
@@ -328,16 +290,18 @@ class AMIUpdater:
         LOG.info("Determining regional search params for each AMI")
         # Flush out codenames.
         for template in templates:
-            template_cn = build_codenames(template)
+            template_cn = build_codenames(template, Config)
             for tcn in template_cn:
                 codenames.add(tcn)
 
         # Retrieve API Results.
         LOG.info("Retreiving results from the EC2 API")
-        results = query_api(codenames)
+        results = query_codenames(codenames, self.regions)
 
         LOG.info("Determining the latest AMI for each Codename/Region")
         updated_ami_results = reduce_api_results(results)
+
+        # Figure out a way to sort dictionary by key-value (timestmap)
 
         LOG.info("Templates updated as necessary")
         for template in templates:

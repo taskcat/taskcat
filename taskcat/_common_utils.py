@@ -8,6 +8,7 @@ import string
 import sys
 from pathlib import Path
 from typing import Optional, Union
+from functools import reduce
 
 import boto3
 from jsonschema import RefResolver, validate
