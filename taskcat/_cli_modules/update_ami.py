@@ -18,6 +18,25 @@ class UpdateAMI:
 
     CLINAME = "update-ami"
 
+    def determine_all_regions(self, test_regions, boto3_cache, profile='default'):
+        ec2_client = boto3_cache.client('ec2', region='us-east-1', profile=profile)
+        region_result = ec2_client.describe_regions()
+        taskcat_id = test_regions[0].taskcat_id
+
+        all_region_names = [x['RegionName'] for x in region_result['Regions']]
+        existing_region_names = [x.name for x in test_regions]
+        region_name_delta = [x for x in all_region_names if x not in existing_region_names]
+        for region_name_to_add in region_name_delta:
+            region_object = RegionObj(
+                name=region_name_to_add,
+                account_id=boto3_cache.account_id(profile),
+                partition=boto3_cache.partition(profile),
+                profile=profile,
+                _boto3_cache=boto3_cache,
+                taskcat_id=taskcat_id
+            )
+            test_regions[region_name_to_add] = region_object
+        return test_regions
 
     def __init__(self, project_root: str = "./"):
         """
@@ -39,7 +58,7 @@ class UpdateAMI:
 
         # Stripping out any test-specific regions/auth.
         config_dict = c.config.to_dict()
-        for test_name, test_config in config_dict['tests'].items():
+        for _, test_config in config_dict['tests'].items():
             if test_config.get('auth', None):
                 del test_config['auth']
             if test_config.get('regions', None):
@@ -49,7 +68,7 @@ class UpdateAMI:
         # Fetching the region objects.
         regions = new_config.get_regions(boto3_cache=_boto3cache)
         rk = list(regions.keys())[0]
-        regions = reconcile_all_regions(regions[rk])
+        regions = self.determine_all_regions(regions[rk], _boto3cache)
 
         # Fetching the template objects.
         _template_dict = {}
@@ -81,25 +100,3 @@ class UpdateAMI:
 
         amiupdater = AMIUpdater(template_list=finalized_templates, regions=regions)
         amiupdater.update_amis()
-
-
-    def reconcile_all_regions(self, test_regions, boto3_cache, profile='default'):
-        ec2_client = boto3_cache.client('ec2', region='us-east-1', profile=profile)
-        region_result = ec2_client.describe_regions()
-        taskcat_id = test_regions[0].taskcat_id
-
-        all_region_names = [x['RegionName'] for x in region_result['Regions']]
-        existing_region_names = [x.name for x in test_regions]
-        region_name_delta = [x for in all_region_names if x not in existing_region_names]
-        
-        for region_name_to_add in region_name_delta:
-            region_object = RegionObj(
-                name=region_name,
-                account_id=boto3_cache.account_id(profile),
-                partition=boto3_cache.partition(profile),
-                profile=profile,
-                _boto3_cache=boto3_cache,
-                taskcat_id=taskcat_id
-            )
-            test_regions.append(region_object)
-        return test_regions
