@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
-     <loc>https://avattathil.github.io/taskcat/</loc>
+     <loc>https://aws-quickstart.github.io/taskcat/</loc>
      <lastmod>2019-10-31</lastmod>
      <changefreq>daily</changefreq>
     </url>
     <url>
-     <loc>https://avattathil.github.io/taskcat/apidocs/taskcat/</loc>
+     <loc>https://aws-quickstart.github.io/taskcat/apidocs/taskcat/</loc>
      <lastmod>2019-10-31</lastmod>
      <changefreq>daily</changefreq>
     </url>
